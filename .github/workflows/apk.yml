@@ -1166,7 +1166,7 @@ jobs:
                   lp.gravity = Gravity.TOP or Gravity.START
                   lp.x = dp(8f)
                   lp.y = dp(170f)
-                  rendreDeplacable(b, b, lp) { basculerPanneau() }
+                  rendreDeplacable(b, b, lp, { basculerPanneau() })
                   wm.addView(b, lp)
                   bulle = b
               }
