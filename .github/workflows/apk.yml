@@ -64,8 +64,8 @@ jobs:
                   applicationId 'com.lushipratique.traducteur'
                   minSdk 29
                   targetSdk 33
-                  versionCode 6
-                  versionName '3.0'
+                  versionCode 7
+                  versionName '4.0'
                   ndk { abiFilters 'arm64-v8a', 'armeabi-v7a' }
               }
               signingConfigs {
@@ -278,7 +278,7 @@ jobs:
               Langue("Français", "fr-FR", "fr", vosk = "vosk-model-small-fr-0.22")
           )
 
-          val CHOIX = listOf(AUTO) + LANGUES
+          val CHOIX = LANGUES
 
           val BLEU = 0xFF283593.toInt()
           val TURQUOISE = 0xFF00BFA5.toInt()
@@ -335,6 +335,7 @@ jobs:
               private lateinit var spSource: Spinner
               private lateinit var rbInterne: RadioButton
               private lateinit var swVoix: Switch
+              private lateinit var swVosk: Switch
               private lateinit var tvEtat: TextView
               private val prefs by lazy { getSharedPreferences("lushi", Context.MODE_PRIVATE) }
 
@@ -373,7 +374,7 @@ jobs:
                   racine.addView(etiquette("Langue du live"))
                   spSource = Spinner(this)
                   spSource.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, CHOIX.map { it.nom })
-                  spSource.setSelection(prefs.getInt("src2", 0).coerceIn(0, CHOIX.size - 1))
+                  spSource.setSelection(prefs.getInt("src3", 0).coerceIn(0, CHOIX.size - 1))
                   racine.addView(spSource)
 
                   val cible = TextView(this)
@@ -401,6 +402,12 @@ jobs:
                   swVoix.isChecked = prefs.getBoolean("voix", false)
                   swVoix.setPadding(0, dp(14f), 0, dp(10f))
                   racine.addView(swVoix)
+
+                  swVosk = Switch(this)
+                  swVosk.text = "🎧 Moteur continu Vosk (essai, téléchargement gratuit)"
+                  swVosk.isChecked = prefs.getBoolean("vosk", false)
+                  swVosk.setPadding(0, dp(4f), 0, dp(10f))
+                  racine.addView(swVosk)
 
                   val bt = Button(this)
                   bt.text = "LANCER LA BULLE"
@@ -448,7 +455,7 @@ jobs:
                       racine.addView(l, lpL)
                   }
                   ligne(commande("📖 Sous-titres", 0xFF00897B.toInt(), "PANNEAU"), commande("✍️ Écrire / 🎤 Parler", 0xFF534AB7.toInt(), "BARRE"))
-                  ligne(commande("📷 Lire l'écran", 0xFFEF6C00.toInt(), "ECRAN"), commande("🔍 Chercher la langue", 0xFF3949AB.toInt(), "DETECTER"))
+                  ligne(commande("📷 Lire l'écran", 0xFFEF6C00.toInt(), "ECRAN"), commande("🔁 Relancer l'écoute", 0xFF3949AB.toInt(), "RELANCER"))
                   ligne(commande("🔊 Voix oui / non", 0xFF6A1B9A.toInt(), "VOIX"), commande("💬 Menu de la bulle", 0xFF283593.toInt(), "MENU"))
 
                   tvEtat = TextView(this)
@@ -459,11 +466,11 @@ jobs:
 
                   val aide = TextView(this)
                   aide.text = "Comment faire :\n" +
-                      "1. Laisse « Automatique » : la bulle reconnaît seule la langue (10 à 30 secondes).\n" +
+                      "1. Choisis la langue du live (tu peux la changer à tout moment depuis la bulle).\n" +
                       "2. Appuie sur LANCER LA BULLE et accepte les autorisations.\n" +
                       "3. Ouvre le live : la bulle 🌐 flotte au-dessus.\n" +
                       "4. Touche la bulle : un menu s'ouvre avec de grands boutons (sous-titres, écrire, parler, voix, langue, arrêter). Glisse-la où tu veux.\n" +
-                      "5. Le bouton 🔍 du panneau relance la recherche de la langue.\n" +
+                      "5. Si la traduction se bloque, touche « Relancer l'écoute ».\n" +
                       "6. Glisse le panneau avec le doigt pour le placer où tu veux. 📌 l'envoie en haut ou en bas.\n\n" +
                       "Couleur de la bulle : vert = je traduis, orange = je cherche, rouge = problème.\n" +
                       "La première fois pour chaque langue, il faut Internet (téléchargement unique)."
@@ -497,9 +504,10 @@ jobs:
 
               private fun lancer() {
                   prefs.edit()
-                      .putInt("src2", spSource.selectedItemPosition)
+                      .putInt("src3", spSource.selectedItemPosition)
                       .putBoolean("micro", !rbInterne.isChecked)
                       .putBoolean("voix", swVoix.isChecked)
+                      .putBoolean("vosk", swVosk.isChecked)
                       .apply()
                   if (!Settings.canDrawOverlays(this)) {
                       etat("Autorise « Afficher par-dessus les autres applis », puis reviens et appuie encore sur LANCER.")
@@ -577,6 +585,7 @@ jobs:
                   val i = Intent(this, BulleService::class.java)
                   i.putExtra("src", spSource.selectedItemPosition)
                   i.putExtra("voix", swVoix.isChecked)
+                  i.putExtra("vosk", swVosk.isChecked)
                   i.putExtra("interne", data != null)
                   i.putExtra("code", code)
                   if (data != null) i.putExtra("data", data)
@@ -647,6 +656,9 @@ jobs:
               private var dernierSigne = 0L
               private var derniereReussite = 0L
               private var faiblesSuite = 0
+              private var videsSuite = 0
+              private val reglages by lazy { getSharedPreferences("lushi", Context.MODE_PRIVATE) }
+              private fun cleStrat(st: Strat) = "${st.surAppareil}-${st.parSource}-${st.segmente}"
               private var verrouJusqua = 0L
               private var precedente: Langue? = null
 
@@ -657,6 +669,7 @@ jobs:
               private var ttsPret = false
               private val enAttente = AtomicInteger(0)
               private var voix = false
+              private var utiliserVosk = false
               private var interne = true
               private val lignes = ArrayDeque<String>()
               private var partielTrad = ""
@@ -718,7 +731,7 @@ jobs:
                               ouvrirPanneauEcran()
                               lireEcran()
                           }
-                          "DETECTER" -> lancerDetection()
+                          "RELANCER" -> langue?.let { arreterEcoute(); choisir(it) }
                           "VOIX" -> {
                               voix = !voix
                               if (voix && tts == null) preparerVoix()
@@ -734,8 +747,9 @@ jobs:
                   enMarche = true
 
                   val choix = CHOIX[intent.getIntExtra("src", 0).coerceIn(0, CHOIX.size - 1)]
-                  auto = choix.code == "auto"
+                  auto = false
                   voix = intent.getBooleanExtra("voix", false)
+                  utiliserVosk = intent.getBooleanExtra("vosk", false)
                   interne = intent.getBooleanExtra("interne", false)
 
                   allumerPremierPlan()
@@ -788,15 +802,7 @@ jobs:
                   strats.add(Strat(surAppareil = false, parSource = false, segmente = false))
 
                   couleurBulle(ORANGE)
-                  if (auto && detectionPossible) {
-                      lancerDetection()
-                  } else if (auto) {
-                      info("Détection automatique impossible sur ce téléphone : choisis la langue du live dans le menu.")
-                      tvTrad?.text = "👉 Touche la bulle et choisis la langue du live."
-                      basculerMenu()
-                  } else {
-                      choisir(choix)
-                  }
+                  choisir(choix)
                   main.postDelayed(garde, 5000)
                   return START_NOT_STICKY
               }
@@ -1272,7 +1278,12 @@ jobs:
                   majBoutonTraduire()
                   tvOrig?.text = if (auto) "✅ Langue détectée : ${l.nom}" else "Langue : ${l.nom}"
                   preparerTraducteur(l)
-                  if (l.vosk.isNotEmpty() && captureOn) demarrerVosk(l) else demarrerEcoute()
+                  if (utiliserVosk && l.vosk.isNotEmpty() && captureOn) {
+                      demarrerVosk(l)
+                  } else {
+                      arreterVosk()
+                      demarrerEcoute()
+                  }
               }
 
               private fun preparerTraducteur(l: Langue) {
@@ -1306,10 +1317,13 @@ jobs:
               // ===================== RECONNAISSANCE EN DIRECT =====================
               private fun demarrerEcoute() {
                   ecouteActive = true
-                  strategie = 0
+                  // On reprend directement la méthode d'écoute qui a marché la dernière fois.
+                  val connue = reglages.getString("methode", null)
+                  strategie = strats.indexOfFirst { cleStrat(it) == connue }.coerceAtLeast(0)
                   resultatsDansStrategie = false
                   erreursSuite = 0
                   faiblesSuite = 0
+                  videsSuite = 0
                   derniereReussite = SystemClock.elapsedRealtime()
                   nouvelleSession()
               }
@@ -1416,8 +1430,12 @@ jobs:
               private fun recu(b: Bundle?) {
                   if (!ecouteActive) return
                   val t = texte(b) ?: return
+                  if (!resultatsDansStrategie) {
+                      strats.getOrNull(strategie)?.let { reglages.edit().putString("methode", cleStrat(it)).apply() }
+                  }
                   resultatsDansStrategie = true
                   erreursSuite = 0
+                  videsSuite = 0
                   derniereReussite = SystemClock.elapsedRealtime()
                   couleurBulle(VERT)
                   val conf = b?.getFloatArray(SpeechRecognizer.CONFIDENCE_SCORES)?.firstOrNull() ?: -1f
@@ -1433,6 +1451,22 @@ jobs:
                   if (!actif || !ecouteActive) return
                   when (code) {
                       SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
+                          // Le moteur ne comprend rien alors que le son passe : on change de méthode d'écoute.
+                          videsSuite++
+                          val sonPresent = SystemClock.elapsedRealtime() - derniereVoix < 4000
+                          if (!resultatsDansStrategie && strategie < strats.size - 1 && videsSuite >= 4 && sonPresent) {
+                              strategie++
+                              videsSuite = 0
+                              erreursSuite = 0
+                              try { reco?.destroy() } catch (_: Exception) {}
+                              reco = null
+                              if (!strats[strategie].parSource) {
+                                  info("J'écoute maintenant par le micro : monte le volume du live.")
+                              }
+                              couleurBulle(ORANGE)
+                              relancer(150)
+                              return
+                          }
                           relancer(20)
                           return
                       }
@@ -1722,7 +1756,6 @@ jobs:
                       entete.addView(v, l)
                   }
                   ajouter(bouton("✍️") { ouvrirBarre() })
-                  ajouter(bouton("🔍") { lancerDetection() })
                   ajouter(bouton("📌") { haurBas() })
                   ajouter(bouton("A-") { changerTaille(-2f) })
                   ajouter(bouton("A+") { changerTaille(2f) })
@@ -1998,18 +2031,18 @@ jobs:
                   etiquette.textSize = 12f
                   etiquette.setPadding(0, dp(12f), 0, dp(4f))
                   m.addView(etiquette)
-                  val noms = listOf("🔍 Automatique") + LANGUES.map { if (it.vosk.isNotEmpty()) it.nom + " 🎧" else it.nom }
-                  val actuel = if (auto) 0 else LANGUES.indexOfFirst { it == langue } + 1
+                  val noms = LANGUES.map { if (utiliserVosk && it.vosk.isNotEmpty()) it.nom + " 🎧" else it.nom }
+                  val actuel = LANGUES.indexOfFirst { it == langue }
                   m.addView(rangeeChips(noms, actuel.coerceAtLeast(0)) { i ->
                       fermerMenu()
-                      if (i == 0) {
-                          lancerDetection()
-                      } else {
-                          auto = false
-                          arreterEcoute()
-                          choisir(LANGUES[i - 1])
-                      }
+                      arreterEcoute()
+                      choisir(LANGUES[i])
                   })
+                  val relancer = grosBouton("🔁 Relancer l'écoute", 0xFF3949AB.toInt()) {
+                      fermerMenu()
+                      langue?.let { arreterEcoute(); choisir(it) }
+                  }
+                  m.addView(relancer, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).also { it.topMargin = dp(10f) })
 
                   val ecran = resources.displayMetrics
                   val lp = WindowManager.LayoutParams(
@@ -2677,6 +2710,6 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.${{ github.run_number }}
-          name: Lushi Traducteur v3.${{ github.run_number }}
+          tag_name: v4.${{ github.run_number }}
+          name: Lushi Traducteur v4.${{ github.run_number }}
           files: lushi-traducteur.apk
