@@ -23,6 +23,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
@@ -63,8 +64,9 @@ jobs:
                   applicationId 'com.lushipratique.traducteur'
                   minSdk 29
                   targetSdk 33
-                  versionCode 1
-                  versionName '1.0'
+                  versionCode 3
+                  versionName '2.1'
+                  ndk { abiFilters 'arm64-v8a', 'armeabi-v7a' }
               }
               signingConfigs {
                   release {
@@ -91,6 +93,11 @@ jobs:
           }
           dependencies {
               implementation 'com.google.mlkit:translate:17.0.3'
+              implementation 'com.google.android.gms:play-services-mlkit-text-recognition:19.0.1'
+              implementation 'com.google.android.gms:play-services-mlkit-text-recognition-korean:16.0.1'
+              implementation 'com.google.android.gms:play-services-mlkit-text-recognition-japanese:16.0.1'
+              implementation 'com.google.android.gms:play-services-mlkit-text-recognition-chinese:16.0.1'
+              implementation 'com.google.android.gms:play-services-mlkit-text-recognition-devanagari:16.0.1'
           }
           LUSHI_FIN
           cat > proj/app/src/main/AndroidManifest.xml <<'LUSHI_FIN'
@@ -112,6 +119,8 @@ jobs:
                   android:icon="@drawable/ic_launcher"
                   android:allowBackup="false"
                   android:theme="@android:style/Theme.Material.Light.NoActionBar">
+                  <meta-data android:name="com.google.mlkit.vision.DEPENDENCIES"
+                      android:value="ocr,ocr_korean,ocr_japanese,ocr_chinese,ocr_devanagari"/>
                   <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTask">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN"/>
@@ -126,10 +135,12 @@ jobs:
           cat > proj/app/src/main/res/drawable/ic_launcher.xml <<'LUSHI_FIN'
           <vector xmlns:android="http://schemas.android.com/apk/res/android"
               android:width="108dp" android:height="108dp"
-              android:viewportWidth="108" android:viewportHeight="108">
-              <path android:fillColor="#00BFA5" android:pathData="M54,4a50,50 0,1 1,0 100a50,50 0,1 1,0 -100z"/>
-              <path android:fillColor="#FFFFFF" android:pathData="M28,30h52a8,8 0,0 1,8 8v26a8,8 0,0 1,-8 8H50l-14,12v-12h-8a8,8 0,0 1,-8 -8V38a8,8 0,0 1,8 -8z"/>
-              <path android:fillColor="#283593" android:pathData="M36,44h36v5h-36zM36,54h26v5h-26z"/>
+              android:viewportWidth="72" android:viewportHeight="72">
+              <path android:fillColor="#3C3489" android:pathData="M36,4a32,32 0,1 1,0 64a32,32 0,1 1,0 -64z"/>
+              <path android:fillColor="#534AB7" android:pathData="M36,4a32,32 0,0 1,32 32h-64a32,32 0,0 1,32 -32z" android:fillAlpha="0.35"/>
+              <path android:fillColor="#FFFFFF" android:pathData="M19,22h34a5,5 0,0 1,5 5v15a5,5 0,0 1,-5 5h-17l-9,8v-8h-8a5,5 0,0 1,-5 -5v-15a5,5 0,0 1,5 -5z"/>
+              <path android:strokeColor="#3C3489" android:strokeWidth="3" android:strokeLineCap="round" android:strokeLineJoin="round" android:fillColor="#00000000" android:pathData="M23,41L29,27L35,41M25.5,36H32.5"/>
+              <path android:strokeColor="#D85A30" android:strokeWidth="2.6" android:strokeLineCap="round" android:fillColor="#00000000" android:pathData="M40,30H51M40,35H51M40,40H47"/>
           </vector>
           LUSHI_FIN
           cat > proj/app/src/main/java/com/lushipratique/traducteur/MainActivity.kt <<'LUSHI_FIN'
@@ -143,19 +154,27 @@ jobs:
           import android.app.NotificationManager
           import android.app.PendingIntent
           import android.app.Service
+          import android.content.ClipData
+          import android.content.ClipboardManager
           import android.content.Context
           import android.content.Intent
           import android.content.pm.PackageManager
           import android.content.pm.ServiceInfo
+          import android.graphics.Bitmap
           import android.graphics.Color
+          import android.graphics.Rect
           import android.graphics.PixelFormat
           import android.graphics.Typeface
           import android.graphics.drawable.GradientDrawable
           import android.graphics.drawable.Icon
+          import android.hardware.display.DisplayManager
+          import android.hardware.display.VirtualDisplay
           import android.media.AudioAttributes
           import android.media.AudioFormat
           import android.media.AudioPlaybackCaptureConfiguration
           import android.media.AudioRecord
+          import android.media.ImageReader
+          import android.media.MediaRecorder
           import android.media.projection.MediaProjection
           import android.media.projection.MediaProjectionManager
           import android.net.Uri
@@ -176,6 +195,7 @@ jobs:
           import android.system.Os
           import android.system.OsConstants
           import android.system.StructPollfd
+          import android.text.InputType
           import android.text.SpannableStringBuilder
           import android.text.TextUtils
           import android.text.style.ForegroundColorSpan
@@ -184,8 +204,12 @@ jobs:
           import android.view.MotionEvent
           import android.view.View
           import android.view.WindowManager
+          import android.view.inputmethod.InputMethodManager
           import android.widget.ArrayAdapter
           import android.widget.Button
+          import android.widget.EditText
+          import android.widget.HorizontalScrollView
+          import android.widget.ImageView
           import android.widget.LinearLayout
           import android.widget.RadioButton
           import android.widget.RadioGroup
@@ -198,40 +222,51 @@ jobs:
           import com.google.mlkit.nl.translate.Translation
           import com.google.mlkit.nl.translate.Translator
           import com.google.mlkit.nl.translate.TranslatorOptions
+          import com.google.mlkit.vision.common.InputImage
+          import com.google.mlkit.vision.text.TextRecognition
+          import com.google.mlkit.vision.text.TextRecognizer
+          import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
+          import com.google.mlkit.vision.text.devanagari.DevanagariTextRecognizerOptions
+          import com.google.mlkit.vision.text.japanese.JapaneseTextRecognizerOptions
+          import com.google.mlkit.vision.text.korean.KoreanTextRecognizerOptions
+          import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+          import java.io.ByteArrayOutputStream
           import java.util.Locale
           import java.util.concurrent.atomic.AtomicInteger
           import kotlin.math.abs
+          import kotlin.math.min
 
           // =====================================================================
-          //  LUSHI TRADUCTEUR — LushiPratique
-          //  Bulle flottante qui écoute un live (YouTube, etc.) et le traduit
-          //  en direct. Reconnaissance + traduction dans le téléphone = rapide.
+          //  LUSHI TRADUCTEUR v2 - LushiPratique
+          //  Bulle flottante : reconnait la langue toute seule et traduit
+          //  tout en francais, en direct.
           // =====================================================================
 
           data class Langue(val nom: String, val parole: String, val code: String)
 
-          val SOURCES = listOf(
-              Langue("Japonais", "ja-JP", "ja"),
+          val AUTO = Langue("Automatique (recommandé)", "", "auto")
+
+          val LANGUES = listOf(
               Langue("Coréen", "ko-KR", "ko"),
-              Langue("Chinois (mandarin)", "zh-CN", "zh"),
+              Langue("Japonais", "ja-JP", "ja"),
+              Langue("Chinois", "zh-CN", "zh"),
               Langue("Anglais", "en-US", "en"),
               Langue("Espagnol", "es-ES", "es"),
               Langue("Portugais", "pt-BR", "pt"),
               Langue("Arabe", "ar-SA", "ar"),
               Langue("Russe", "ru-RU", "ru"),
               Langue("Hindi", "hi-IN", "hi"),
+              Langue("Indonésien", "id-ID", "id"),
+              Langue("Vietnamien", "vi-VN", "vi"),
+              Langue("Thaï", "th-TH", "th"),
+              Langue("Turc", "tr-TR", "tr"),
               Langue("Allemand", "de-DE", "de"),
               Langue("Italien", "it-IT", "it"),
-              Langue("Turc", "tr-TR", "tr"),
               Langue("Swahili", "sw-TZ", "sw"),
               Langue("Français", "fr-FR", "fr")
           )
 
-          val CIBLES = listOf(
-              Langue("Français", "fr-FR", "fr"),
-              Langue("Anglais", "en-US", "en"),
-              Langue("Swahili", "sw-TZ", "sw")
-          )
+          val CHOIX = listOf(AUTO) + LANGUES
 
           val BLEU = 0xFF283593.toInt()
           val TURQUOISE = 0xFF00BFA5.toInt()
@@ -241,6 +276,39 @@ jobs:
           val ROUGE = 0xFFE53935.toInt()
           const val TAUX = 16000
           const val CANAL = "lushi_trad"
+          const val CIBLE = "fr"
+          const val CIBLE_VOIX = "fr-FR"
+
+          // Filtre audio simple (biquad). Sert à garder la bande de la voix humaine
+          // et à atténuer les basses et les aigus de la musique de fond.
+          class Filtre(private val b0: Float, private val b1: Float, private val b2: Float,
+                       private val a1: Float, private val a2: Float) {
+              private var x1 = 0f
+              private var x2 = 0f
+              private var y1 = 0f
+              private var y2 = 0f
+              fun f(x: Float): Float {
+                  val y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
+                  x2 = x1; x1 = x; y2 = y1; y1 = y
+                  return y
+              }
+              companion object {
+                  fun passeHaut(fc: Float, fs: Float): Filtre {
+                      val w = 2.0 * Math.PI * fc / fs
+                      val c = Math.cos(w); val al = Math.sin(w) / (2 * 0.707)
+                      val a0 = 1 + al
+                      return Filtre(((1 + c) / 2 / a0).toFloat(), (-(1 + c) / a0).toFloat(), ((1 + c) / 2 / a0).toFloat(),
+                          (-2 * c / a0).toFloat(), ((1 - al) / a0).toFloat())
+                  }
+                  fun passeBas(fc: Float, fs: Float): Filtre {
+                      val w = 2.0 * Math.PI * fc / fs
+                      val c = Math.cos(w); val al = Math.sin(w) / (2 * 0.707)
+                      val a0 = 1 + al
+                      return Filtre(((1 - c) / 2 / a0).toFloat(), ((1 - c) / a0).toFloat(), ((1 - c) / 2 / a0).toFloat(),
+                          (-2 * c / a0).toFloat(), ((1 - al) / a0).toFloat())
+                  }
+              }
+          }
 
           fun Context.dp(v: Float): Int =
               TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v, resources.displayMetrics).toInt()
@@ -249,22 +317,23 @@ jobs:
               GradientDrawable().apply { setColor(couleur); cornerRadius = rayon }
 
           // =====================================================================
-          //  ÉCRAN DE RÉGLAGE
+          //  ECRAN DE REGLAGE
           // =====================================================================
           class MainActivity : Activity() {
               private lateinit var spSource: Spinner
-              private lateinit var spCible: Spinner
               private lateinit var rbInterne: RadioButton
               private lateinit var swVoix: Switch
               private lateinit var tvEtat: TextView
               private val prefs by lazy { getSharedPreferences("lushi", Context.MODE_PRIVATE) }
 
-              private fun etiquette(t: String): TextView = TextView(this).apply {
-                  text = t
-                  textSize = 14f
-                  setTypeface(null, Typeface.BOLD)
-                  setTextColor(BLEU)
-                  setPadding(0, dp(14f), 0, dp(4f))
+              private fun etiquette(t: String): TextView {
+                  val v = TextView(this)
+                  v.text = t
+                  v.textSize = 14f
+                  v.setTypeface(null, Typeface.BOLD)
+                  v.setTextColor(BLEU)
+                  v.setPadding(0, dp(14f), 0, dp(4f))
+                  return v
               }
 
               override fun onCreate(savedInstanceState: Bundle?) {
@@ -283,23 +352,24 @@ jobs:
                   racine.addView(titre)
 
                   val sous = TextView(this)
-                  sous.text = "Comprends les lives du monde entier dans ta langue.\nLushiPratique — la technologie au service de la cité"
+                  sous.text = "Toutes les langues des lives, traduites en français.\nLushiPratique - la technologie au service de la cité"
                   sous.textSize = 13f
                   sous.setTextColor(0xFF555A75.toInt())
                   sous.setPadding(0, dp(4f), 0, dp(8f))
                   racine.addView(sous)
 
-                  racine.addView(etiquette("Langue de l'émission"))
+                  racine.addView(etiquette("Langue du live"))
                   spSource = Spinner(this)
-                  spSource.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, SOURCES.map { it.nom })
-                  spSource.setSelection(prefs.getInt("src", 0).coerceIn(0, SOURCES.size - 1))
+                  spSource.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, CHOIX.map { it.nom })
+                  spSource.setSelection(prefs.getInt("src2", 0).coerceIn(0, CHOIX.size - 1))
                   racine.addView(spSource)
 
-                  racine.addView(etiquette("Traduire en"))
-                  spCible = Spinner(this)
-                  spCible.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, CIBLES.map { it.nom })
-                  spCible.setSelection(prefs.getInt("cib", 0).coerceIn(0, CIBLES.size - 1))
-                  racine.addView(spCible)
+                  val cible = TextView(this)
+                  cible.text = "Traduction : toujours en français 🇫🇷"
+                  cible.textSize = 14f
+                  cible.setTextColor(0xFF1B5E20.toInt())
+                  cible.setPadding(0, dp(8f), 0, 0)
+                  racine.addView(cible)
 
                   racine.addView(etiquette("Comment écouter"))
                   val rg = RadioGroup(this)
@@ -326,7 +396,9 @@ jobs:
                   bt.setTextColor(Color.WHITE)
                   bt.background = fond(TURQUOISE, dp(14f).toFloat())
                   bt.setOnClickListener { lancer() }
-                  racine.addView(bt, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(58f)).apply { topMargin = dp(10f) })
+                  val lpBt = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(58f))
+                  lpBt.topMargin = dp(10f)
+                  racine.addView(bt, lpBt)
 
                   val btStop = Button(this)
                   btStop.text = "Arrêter la bulle"
@@ -336,7 +408,9 @@ jobs:
                       stopService(Intent(this, BulleService::class.java))
                       etat("Bulle arrêtée.")
                   }
-                  racine.addView(btStop, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48f)).apply { topMargin = dp(10f) })
+                  val lpStop = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48f))
+                  lpStop.topMargin = dp(10f)
+                  racine.addView(btStop, lpStop)
 
                   tvEtat = TextView(this)
                   tvEtat.textSize = 14f
@@ -346,12 +420,14 @@ jobs:
 
                   val aide = TextView(this)
                   aide.text = "Comment faire :\n" +
-                      "1. Choisis la langue du live et ta langue.\n" +
+                      "1. Laisse « Automatique » : la bulle reconnaît seule la langue (10 à 30 secondes).\n" +
                       "2. Appuie sur LANCER LA BULLE et accepte les autorisations.\n" +
-                      "3. Ouvre YouTube : la bulle 🌐 flotte au-dessus.\n" +
-                      "4. Touche la bulle pour montrer ou cacher les sous-titres. Glisse-la où tu veux.\n\n" +
-                      "Couleur de la bulle : vert = j'écoute, orange = je cherche la meilleure façon d'écouter, rouge = problème.\n" +
-                      "La première fois, il faut Internet pour télécharger la langue."
+                      "3. Ouvre le live : la bulle 🌐 flotte au-dessus.\n" +
+                      "4. Touche la bulle : un menu s'ouvre avec de grands boutons (sous-titres, écrire, parler, voix, langue, arrêter). Glisse-la où tu veux.\n" +
+                      "5. Le bouton 🔍 du panneau relance la recherche de la langue.\n" +
+                      "6. Glisse le panneau avec le doigt pour le placer où tu veux. 📌 l'envoie en haut ou en bas.\n\n" +
+                      "Couleur de la bulle : vert = je traduis, orange = je cherche, rouge = problème.\n" +
+                      "La première fois pour chaque langue, il faut Internet (téléchargement unique)."
                   aide.textSize = 13f
                   aide.setTextColor(0xFF424767.toInt())
                   racine.addView(aide)
@@ -367,8 +443,7 @@ jobs:
 
               private fun lancer() {
                   prefs.edit()
-                      .putInt("src", spSource.selectedItemPosition)
-                      .putInt("cib", spCible.selectedItemPosition)
+                      .putInt("src2", spSource.selectedItemPosition)
                       .putBoolean("micro", !rbInterne.isChecked)
                       .putBoolean("voix", swVoix.isChecked)
                       .apply()
@@ -402,15 +477,14 @@ jobs:
               }
 
               private fun preparerLangue() {
-                  val s = SOURCES[spSource.selectedItemPosition]
-                  val c = CIBLES[spCible.selectedItemPosition]
-                  if (s.code == c.code) {
+                  val s = CHOIX[spSource.selectedItemPosition]
+                  if (s.code == "auto" || s.code == CIBLE) {
                       suite()
                       return
                   }
-                  etat("Préparation ${s.nom} → ${c.nom}… (la première fois, il faut Internet)")
+                  etat("Préparation ${s.nom} > français... (la première fois, il faut Internet)")
                   val tr = Translation.getClient(
-                      TranslatorOptions.Builder().setSourceLanguage(s.code).setTargetLanguage(c.code).build()
+                      TranslatorOptions.Builder().setSourceLanguage(s.code).setTargetLanguage(CIBLE).build()
                   )
                   tr.downloadModelIfNeeded(DownloadConditions.Builder().build())
                       .addOnSuccessListener {
@@ -419,7 +493,7 @@ jobs:
                       }
                       .addOnFailureListener { e ->
                           tr.close()
-                                                    etat("Téléchargement de la langue impossible. Vérifie ta connexion. (${e.message})")
+                          etat("Téléchargement de la langue impossible. Vérifie ta connexion. (${e.message})")
                       }
               }
 
@@ -448,38 +522,58 @@ jobs:
                   stopService(Intent(this, BulleService::class.java))
                   val i = Intent(this, BulleService::class.java)
                   i.putExtra("src", spSource.selectedItemPosition)
-                  i.putExtra("cib", spCible.selectedItemPosition)
                   i.putExtra("voix", swVoix.isChecked)
                   i.putExtra("interne", data != null)
                   i.putExtra("code", code)
                   if (data != null) i.putExtra("data", data)
                   startForegroundService(i)
-                  etat("✅ Bulle lancée. Ouvre YouTube : la bulle 🌐 flotte au-dessus.")
+                  etat("✅ Bulle lancée. Ouvre le live : la bulle 🌐 flotte au-dessus.")
                   moveTaskToBack(true)
               }
           }
 
           // =====================================================================
-          //  LA BULLE (service au premier plan)
+          //  LA BULLE
           // =====================================================================
           class BulleService : Service() {
 
-              private data class Strat(val surAppareil: Boolean, val sonInterne: Boolean, val segmente: Boolean)
+              private data class Strat(val surAppareil: Boolean, val parSource: Boolean, val segmente: Boolean)
 
               private val main = Handler(Looper.getMainLooper())
               private lateinit var wm: WindowManager
-              private var bulle: TextView? = null
+              private var bulle: ImageView? = null
               private var panneau: LinearLayout? = null
+              private var tvTitre: TextView? = null
               private var tvTrad: TextView? = null
               private var tvOrig: TextView? = null
 
+              // --- capture du son ---
               private var projection: MediaProjection? = null
               private var enregistreur: AudioRecord? = null
               private var filCapture: Thread? = null
+              private var captureMicro = false
+              @Volatile private var captureOn = false
               @Volatile private var actif = false
               @Volatile private var ecriture: ParcelFileDescriptor? = null
               private var lecture: ParcelFileDescriptor? = null
+              @Volatile private var derniereVoix = 0L
 
+              // --- détection automatique de la langue ---
+              @Volatile private var collecte = false
+              @Volatile private var voixMs = 0
+              private val clipBuf = ByteArrayOutputStream()
+              private var clip: ByteArray? = null
+              private var auto = true
+              private var langue: Langue? = null
+              private var idxTest = 0
+              private val scores = HashMap<String, Float>()
+              private var recoTest: SpeechRecognizer? = null
+              private var lectureTest: ParcelFileDescriptor? = null
+              private var testEnCours = false
+              private var erreursSourceTest = 0
+              private var detectionPossible = true
+
+              // --- reconnaissance en direct ---
               private var reco: SpeechRecognizer? = null
               private var recoStrat: Strat? = null
               private val strats = mutableListOf<Strat>()
@@ -487,33 +581,51 @@ jobs:
               private var resultatsDansStrategie = false
               private var erreursSuite = 0
               private var enCours = false
+              private var ecouteActive = false
               private var dernierSigne = 0L
+              private var derniereReussite = 0L
+              private var faiblesSuite = 0
+              private var verrouJusqua = 0L
+              private var precedente: Langue? = null
 
+              // --- traduction et voix ---
               private var traducteur: Translator? = null
+              private var traducteurPret = false
               private var tts: TextToSpeech? = null
               private var ttsPret = false
               private val enAttente = AtomicInteger(0)
-
-              private var interne = true
               private var voix = false
-              private var source = SOURCES[0]
-              private var cible = CIBLES[0]
+              private var interne = true
               private val lignes = ArrayDeque<String>()
               private var partielTrad = ""
               private var seqPartiel = 0
               private var dernierPartiel = 0L
+              private var ligneDePause = false
+              private val validerPause = Runnable { poserPause() }
               private var taille = 19f
               private var demarre = false
 
               private val runSession = Runnable { nouvelleSession() }
+              private val timeoutTest = Runnable {
+                  try { recoTest?.cancel() } catch (_: Exception) {}
+                  finTest(0f, false)
+              }
+              private val timeoutCollecte = Runnable { finCollecteForcee() }
 
               private val garde = object : Runnable {
                   override fun run() {
                       if (!actif) return
-                      if (enCours && SystemClock.elapsedRealtime() - dernierSigne > 25000) {
-                          try { reco?.cancel() } catch (_: Exception) {}
-                          enCours = false
-                          nouvelleSession()
+                      val now = SystemClock.elapsedRealtime()
+                      if (ecouteActive) {
+                          if (enCours && now - dernierSigne > 25000) {
+                              try { reco?.cancel() } catch (_: Exception) {}
+                              enCours = false
+                              nouvelleSession()
+                          }
+                          if (auto && detectionPossible && now > verrouJusqua && now - derniereReussite > 60000 && now - derniereVoix < 3000) {
+                              info("La langue a peut-être changé : je cherche à nouveau.")
+                              lancerDetection()
+                          }
                       }
                       main.postDelayed(this, 5000)
                   }
@@ -530,8 +642,8 @@ jobs:
                   if (demarre || intent == null) return START_NOT_STICKY
                   demarre = true
 
-                  source = SOURCES[intent.getIntExtra("src", 0).coerceIn(0, SOURCES.size - 1)]
-                  cible = CIBLES[intent.getIntExtra("cib", 0).coerceIn(0, CIBLES.size - 1)]
+                  val choix = CHOIX[intent.getIntExtra("src", 0).coerceIn(0, CHOIX.size - 1)]
+                  auto = choix.code == "auto"
                   voix = intent.getBooleanExtra("voix", false)
                   interne = intent.getBooleanExtra("interne", false)
 
@@ -546,15 +658,10 @@ jobs:
                       stopSelf()
                       return START_NOT_STICKY
                   }
-
-                  if (source.code != cible.code) {
-                      traducteur = Translation.getClient(
-                          TranslatorOptions.Builder().setSourceLanguage(source.code).setTargetLanguage(cible.code).build()
-                      )
-                  }
                   if (voix) preparerVoix()
-
                   actif = true
+
+                  var captureOk = false
                   if (interne) {
                       val code = intent.getIntExtra("code", 0)
                       val data: Intent? = intent.getParcelableExtra("data")
@@ -569,24 +676,35 @@ jobs:
                       } catch (e: Exception) {
                           projection = null
                       }
-                      if (projection == null || !demarrerCapture()) {
-                          interne = false
-                          info("Son interne indisponible : j'écoute par le micro (monte le volume).")
-                      }
+                      captureOk = projection != null && demarrerCapture(true)
+                      if (!captureOk) info("Son interne indisponible : j'écoute par le micro (monte le volume).")
+                  }
+                  if (!captureOk) {
+                      interne = false
+                      captureOk = demarrerCapture(false)
                   }
 
                   strats.clear()
-                  if (interne) {
-                      if (Build.VERSION.SDK_INT >= 33 && SpeechRecognizer.isOnDeviceRecognitionAvailable(this)) {
-                          strats.add(Strat(surAppareil = true, sonInterne = true, segmente = true))
+                  if (captureOk && Build.VERSION.SDK_INT >= 33) {
+                      if (SpeechRecognizer.isOnDeviceRecognitionAvailable(this)) {
+                          strats.add(Strat(surAppareil = true, parSource = true, segmente = true))
                       }
-                      strats.add(Strat(surAppareil = false, sonInterne = true, segmente = true))
-                      strats.add(Strat(surAppareil = false, sonInterne = true, segmente = false))
+                      strats.add(Strat(surAppareil = false, parSource = true, segmente = true))
+                      strats.add(Strat(surAppareil = false, parSource = true, segmente = false))
+                  } else {
+                      detectionPossible = false
                   }
-                  strats.add(Strat(surAppareil = false, sonInterne = false, segmente = false))
-                  strategie = 0
+                  strats.add(Strat(surAppareil = false, parSource = false, segmente = false))
+
                   couleurBulle(ORANGE)
-                  nouvelleSession()
+                  if (auto && detectionPossible) {
+                      lancerDetection()
+                  } else if (auto) {
+                      info("Détection automatique impossible sur ce téléphone : choisis la langue dans l'application.")
+                      choisir(LANGUES[3])
+                  } else {
+                      choisir(choix)
+                  }
                   main.postDelayed(garde, 5000)
                   return START_NOT_STICKY
               }
@@ -605,7 +723,7 @@ jobs:
                   val n = Notification.Builder(this, CANAL)
                       .setSmallIcon(R.drawable.ic_launcher)
                       .setContentTitle("Lushi Traducteur actif")
-                      .setContentText("${source.nom} → ${cible.nom}")
+                      .setContentText("Traduction en français")
                       .setContentIntent(ouvrir)
                       .addAction(Notification.Action.Builder(Icon.createWithResource(this, R.drawable.ic_launcher), "Arrêter", stop).build())
                       .setOngoing(true)
@@ -617,13 +735,12 @@ jobs:
                   startForeground(7, n, type)
               }
 
-              // ------------------------- VOIX -------------------------
+              // ============================ VOIX ============================
               private fun preparerVoix() {
                   tts = TextToSpeech(this) { st ->
                       val t = tts
                       if (st == TextToSpeech.SUCCESS && t != null) {
-                          t.setLanguage(Locale.forLanguageTag(cible.parole))
-                          // Usage "accessibilité" : la bulle ne s'entend pas elle-même.
+                          t.setLanguage(Locale.forLanguageTag(CIBLE_VOIX))
                           t.setAudioAttributes(
                               AudioAttributes.Builder()
                                   .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
@@ -649,42 +766,47 @@ jobs:
               private fun parler(t: String) {
                   val v = tts ?: return
                   if (!voix || !ttsPret || t.isBlank()) return
-                  // Si la voix prend du retard, on saute à la phrase la plus récente.
                   val mode = if (enAttente.get() >= 2) {
                       enAttente.set(0)
                       TextToSpeech.QUEUE_FLUSH
                   } else TextToSpeech.QUEUE_ADD
                   enAttente.incrementAndGet()
-                                    v.speak(t, mode, null, "t" + SystemClock.elapsedRealtime())
+                  v.speak(t, mode, null, "t" + SystemClock.elapsedRealtime())
               }
 
-              // ------------------------- CAPTURE DU SON -------------------------
+              // ============================ CAPTURE ============================
               @SuppressLint("MissingPermission")
-              private fun demarrerCapture(): Boolean {
-                  val pj = projection ?: return false
+              private fun demarrerCapture(sonInterne: Boolean): Boolean {
                   try {
-                      val cfg = AudioPlaybackCaptureConfiguration.Builder(pj)
-                          .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
-                          .addMatchingUsage(AudioAttributes.USAGE_GAME)
-                          .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
-                          .build()
                       val fmt = AudioFormat.Builder()
                           .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                           .setSampleRate(TAUX)
                           .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
                           .build()
                       val min = AudioRecord.getMinBufferSize(TAUX, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-                      val rec = AudioRecord.Builder()
+                      val b = AudioRecord.Builder()
                           .setAudioFormat(fmt)
                           .setBufferSizeInBytes(maxOf(min * 4, TAUX * 2))
-                          .setAudioPlaybackCaptureConfig(cfg)
-                          .build()
+                      if (sonInterne) {
+                          val pj = projection ?: return false
+                          val cfg = AudioPlaybackCaptureConfiguration.Builder(pj)
+                              .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
+                              .addMatchingUsage(AudioAttributes.USAGE_GAME)
+                              .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
+                              .build()
+                          b.setAudioPlaybackCaptureConfig(cfg)
+                      } else {
+                          b.setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
+                      }
+                      val rec = b.build()
                       if (rec.state != AudioRecord.STATE_INITIALIZED) {
                           rec.release()
                           return false
                       }
                       rec.startRecording()
                       enregistreur = rec
+                      captureMicro = !sonInterne
+                      captureOn = true
                       val th = Thread({ boucleCapture(rec) }, "capture-son")
                       th.priority = Thread.MAX_PRIORITY
                       th.start()
@@ -695,28 +817,72 @@ jobs:
                   }
               }
 
-              // Lit le son du téléphone par morceaux de 100 ms et le pousse vers la
-              // reconnaissance. Jamais bloquant : si la reconnaissance est occupée,
-              // le morceau est sauté (on garde toujours le direct).
+              private fun arreterCapture() {
+                  captureOn = false
+                  try { filCapture?.join(300) } catch (_: Exception) {}
+                  try { enregistreur?.stop() } catch (_: Exception) {}
+                  try { enregistreur?.release() } catch (_: Exception) {}
+                  enregistreur = null
+              }
+
+              // Lit le son par morceaux de 100 ms. Amplifie les voix faibles,
+              // garde un extrait pour reconnaître la langue, et envoie le son
+              // en direct à la reconnaissance sans jamais bloquer.
               private fun boucleCapture(rec: AudioRecord) {
-                  val buf = ByteArray(TAUX / 5) // 3200 octets = 100 ms
+                  val buf = ByteArray(TAUX / 5)
                   var courant: ParcelFileDescriptor? = null
                   var casse = false
                   val pfd = StructPollfd()
                   val tab = arrayOf(pfd)
-                  while (actif) {
+                  var gain = 1f
+                  val ech_f = FloatArray(buf.size / 2)
+                  val haut1 = Filtre.passeHaut(150f, TAUX.toFloat())
+                  val haut2 = Filtre.passeHaut(150f, TAUX.toFloat())
+                  val bas1 = Filtre.passeBas(3600f, TAUX.toFloat())
+                  val bas2 = Filtre.passeBas(3600f, TAUX.toFloat())
+                  while (actif && captureOn) {
                       val n = rec.read(buf, 0, buf.size)
-                      val voulu = ecriture
-                      if (voulu !== courant) {
-                          try { courant?.close() } catch (_: Exception) {}
-                          courant = voulu
-                          casse = false
-                      }
-                      val w = courant
-                      if (n <= 0 || w == null || casse) {
+                      if (n <= 0) {
                           if (n < 0) SystemClock.sleep(20)
                           continue
                       }
+                      val ech = n / 2
+                      // 1) Filtre "voix principale" : coupe les basses (< 150 Hz) et les aigus (> 3600 Hz)
+                      //    où se trouve surtout la musique, garde la bande de la parole.
+                      var crete = 0
+                      for (i in 0 until ech) {
+                          val s = ((buf[2 * i + 1].toInt() shl 8) or (buf[2 * i].toInt() and 0xFF)).toShort().toInt()
+                          ech_f[i] = bas2.f(bas1.f(haut2.f(haut1.f(s.toFloat()))))
+                          val a = abs(ech_f[i].toInt())
+                          if (a > crete) crete = a
+                      }
+                      val voixPresente = crete > 500
+                      if (voixPresente) derniereVoix = SystemClock.elapsedRealtime()
+                      // 2) Amplificateur automatique pour les voix faibles.
+                      val voulu = if (crete > 150) (14000f / crete).coerceIn(1f, 8f) else gain
+                      gain = if (voulu < gain) voulu else gain + (voulu - gain) * 0.15f
+                      for (i in 0 until ech) {
+                          val v = (ech_f[i] * gain).toInt().coerceIn(-32768, 32767)
+                          buf[2 * i] = (v and 0xFF).toByte()
+                          buf[2 * i + 1] = ((v shr 8) and 0xFF).toByte()
+                      }
+                      if (collecte && voixPresente) {
+                          clipBuf.write(buf, 0, n)
+                          voixMs += n * 1000 / (TAUX * 2)
+                          if (voixMs >= 5000) {
+                              collecte = false
+                              val c = clipBuf.toByteArray()
+                              main.post { clipPret(c) }
+                          }
+                      }
+                      val voulue = ecriture
+                      if (voulue !== courant) {
+                          try { courant?.close() } catch (_: Exception) {}
+                          courant = voulue
+                          casse = false
+                      }
+                      val w = courant
+                      if (w == null || casse) continue
                       try {
                           pfd.fd = w.fileDescriptor
                           pfd.events = OsConstants.POLLOUT.toShort()
@@ -737,12 +903,255 @@ jobs:
                   try { courant?.close() } catch (_: Exception) {}
               }
 
-              // ------------------------- RECONNAISSANCE -------------------------
+              // ===================== DETECTION AUTOMATIQUE =====================
+              private fun lancerDetection() {
+                  if (!actif) return
+                  if (!detectionPossible || !captureOn) {
+                      info("Détection automatique impossible ici : choisis la langue dans l'application.")
+                      return
+                  }
+                  arreterEcoute()
+                  auto = true
+                  if (langue != null) precedente = langue
+                  langue = null
+                  scores.clear()
+                  idxTest = 0
+                  erreursSourceTest = 0
+                  clipBuf.reset()
+                  voixMs = 0
+                  collecte = true
+                  majTitre()
+                  lignes.clear()
+                  partielTrad = ""
+                  tvTrad?.text = "🔍 J'écoute pour reconnaître la langue..."
+                  tvOrig?.text = "Laisse parler la personne quelques secondes."
+                  couleurBulle(ORANGE)
+                  main.removeCallbacks(timeoutCollecte)
+                  main.postDelayed(timeoutCollecte, 25000)
+              }
+
+              private fun finCollecteForcee() {
+                  if (!collecte || !actif) return
+                  if (voixMs >= 1500) {
+                      collecte = false
+                      clipPret(clipBuf.toByteArray())
+                  } else {
+                      tvOrig?.text = "Je n'entends pas encore de voix. Lance la vidéo ou monte le volume."
+                      main.postDelayed(timeoutCollecte, 10000)
+                  }
+              }
+
+              private fun clipPret(c: ByteArray) {
+                  main.removeCallbacks(timeoutCollecte)
+                  if (!actif) return
+                  clip = c
+                  idxTest = 0
+                  testerSuivant()
+              }
+
+              private fun intentBase(parole: String, partiels: Boolean): Intent {
+                  val it = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+                  it.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                  it.putExtra(RecognizerIntent.EXTRA_LANGUAGE, parole)
+                  it.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, partiels)
+                  it.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+                  it.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
+                  it.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 800L)
+                  it.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 600L)
+                  return it
+              }
+
+              private fun mettreSource(it: Intent, p: ParcelFileDescriptor, segmente: Boolean) {
+                  it.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE, p)
+                  it.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_CHANNEL_COUNT, 1)
+                  it.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_ENCODING, AudioFormat.ENCODING_PCM_16BIT)
+                  it.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_SAMPLING_RATE, TAUX)
+                  if (segmente) {
+                      it.putExtra(RecognizerIntent.EXTRA_SEGMENTED_SESSION, RecognizerIntent.EXTRA_AUDIO_SOURCE)
+                  }
+              }
+
+              private fun testerSuivant() {
+                  if (!actif || langue != null) return
+                  if (idxTest >= LANGUES.size) {
+                      choisirGagnant()
+                      return
+                  }
+                  val l = LANGUES[idxTest]
+                  tvTrad?.text = "🔍 Recherche de la langue... (${idxTest + 1}/${LANGUES.size})"
+                  tvOrig?.text = "Essai : ${l.nom}"
+                  try {
+                      if (recoTest == null) {
+                          recoTest = SpeechRecognizer.createSpeechRecognizer(this)
+                          recoTest?.setRecognitionListener(ecouteurTest)
+                      }
+                      val p = ParcelFileDescriptor.createPipe()
+                      try { lectureTest?.close() } catch (_: Exception) {}
+                      lectureTest = p[0]
+                      val it = intentBase(l.parole, false)
+                      mettreSource(it, p[0], false)
+                      testEnCours = true
+                      recoTest?.startListening(it)
+                      val donnees = clip ?: ByteArray(0)
+                      val w = p[1]
+                      Thread {
+                          try {
+                              ParcelFileDescriptor.AutoCloseOutputStream(w).use { o ->
+                                  o.write(donnees)
+                                  o.write(ByteArray(TAUX * 2))
+                              }
+                          } catch (_: Exception) {}
+                      }.start()
+                      main.postDelayed(timeoutTest, 10000)
+                  } catch (e: Exception) {
+                      testEnCours = true
+                      finTest(0f, true)
+                  }
+              }
+
+              private val ecouteurTest = object : RecognitionListener {
+                  override fun onReadyForSpeech(params: Bundle?) {}
+                  override fun onBeginningOfSpeech() {}
+                  override fun onRmsChanged(rmsdB: Float) {}
+                  override fun onBufferReceived(buffer: ByteArray?) {}
+                  override fun onEndOfSpeech() {}
+                  override fun onEvent(eventType: Int, params: Bundle?) {}
+                  override fun onPartialResults(partialResults: Bundle?) {}
+
+                  override fun onResults(results: Bundle?) {
+                      val t = texte(results)
+                      val conf = results?.getFloatArray(SpeechRecognizer.CONFIDENCE_SCORES)?.firstOrNull() ?: -1f
+                      val s = when {
+                          t == null -> 0f
+                          conf > 0f -> conf
+                          else -> 0.3f + min(t.length, 60) / 300f
+                      }
+                      finTest(s, false)
+                  }
+
+                  override fun onError(error: Int) {
+                      finTest(0f, error == 3 || error == 5 || error == 11)
+                  }
+              }
+
+              private fun finTest(score: Float, erreurSource: Boolean) {
+                  if (!testEnCours) return
+                  testEnCours = false
+                  main.removeCallbacks(timeoutTest)
+                  try { lectureTest?.close() } catch (_: Exception) {}
+                  lectureTest = null
+                  if (!actif || langue != null || idxTest >= LANGUES.size) return
+                  if (erreurSource) erreursSourceTest++
+                  val l = LANGUES[idxTest]
+                  scores[l.code] = score
+                  if (erreursSourceTest >= 3 && scores.values.all { it <= 0f }) {
+                      detectionPossible = false
+                      info("Ce téléphone ne permet pas la détection automatique. Choisis la langue dans l'application.")
+                      choisir(LANGUES[3])
+                      return
+                  }
+                  idxTest++
+                  if (score >= 0.85f) {
+                      choisir(l)
+                      return
+                  }
+                  main.postDelayed({ testerSuivant() }, 30)
+              }
+
+              private fun choisirGagnant() {
+                  val meilleur = scores.maxByOrNull { it.value }
+                  if (meilleur == null || meilleur.value < 0.2f) {
+                      tvOrig?.text = "Langue pas encore reconnue, je réessaie..."
+                      main.postDelayed({ lancerDetection() }, 800)
+                      return
+                  }
+                  var l = LANGUES.firstOrNull { it.code == meilleur.key } ?: LANGUES[3]
+                  // On garde la langue d'avant si elle est presque aussi bonne : pas de saut inutile.
+                  val avant = precedente
+                  val scoreAvant = if (avant != null) scores[avant.code] ?: 0f else 0f
+                  if (avant != null && avant != l && scoreAvant >= meilleur.value - 0.15f) l = avant
+                  choisir(l)
+              }
+
+              private fun choisir(l: Langue) {
+                  langue = l
+                  // La langue reste verrouillée au moins 90 secondes : pas de mélange.
+                  verrouJusqua = SystemClock.elapsedRealtime() + 90000
+                  collecte = false
+                  main.removeCallbacks(timeoutCollecte)
+                  main.removeCallbacks(timeoutTest)
+                  testEnCours = false
+                  try { recoTest?.destroy() } catch (_: Exception) {}
+                  recoTest = null
+                  majTitre()
+                  majBoutonTraduire()
+                  tvOrig?.text = if (auto) "✅ Langue détectée : ${l.nom}" else "Langue : ${l.nom}"
+                  preparerTraducteur(l)
+                  demarrerEcoute()
+              }
+
+              private fun preparerTraducteur(l: Langue) {
+                  try { traducteur?.close() } catch (_: Exception) {}
+                  traducteur = null
+                  traducteurPret = false
+                  if (l.code == CIBLE) {
+                      traducteurPret = true
+                      return
+                  }
+                  val tr = Translation.getClient(
+                      TranslatorOptions.Builder().setSourceLanguage(l.code).setTargetLanguage(CIBLE).build()
+                  )
+                  traducteur = tr
+                  tvTrad?.text = "Préparation ${l.nom} > français... (la première fois, il faut Internet)"
+                  tr.downloadModelIfNeeded(DownloadConditions.Builder().build())
+                      .addOnSuccessListener {
+                          if (traducteur === tr) {
+                              traducteurPret = true
+                              if (lignes.isEmpty()) tvTrad?.text = "Prêt : ${l.nom} > français."
+                          }
+                      }
+                      .addOnFailureListener {
+                          if (traducteur === tr && actif) {
+                              tvOrig?.text = "Téléchargement de la langue impossible. Vérifie Internet. Nouvel essai..."
+                              main.postDelayed({ if (traducteur === tr && actif) preparerTraducteur(l) }, 8000)
+                          }
+                      }
+              }
+
+              // ===================== RECONNAISSANCE EN DIRECT =====================
+              private fun demarrerEcoute() {
+                  ecouteActive = true
+                  strategie = 0
+                  resultatsDansStrategie = false
+                  erreursSuite = 0
+                  faiblesSuite = 0
+                  derniereReussite = SystemClock.elapsedRealtime()
+                  nouvelleSession()
+              }
+
+              private fun arreterEcoute() {
+                  ecouteActive = false
+                  main.removeCallbacks(runSession)
+                  main.removeCallbacks(timeoutTest)
+                  testEnCours = false
+                  try { reco?.cancel() } catch (_: Exception) {}
+                  try { reco?.destroy() } catch (_: Exception) {}
+                  reco = null
+                  recoStrat = null
+                  enCours = false
+                  try { recoTest?.cancel() } catch (_: Exception) {}
+                  ecriture = null
+                  try { lecture?.close() } catch (_: Exception) {}
+                  lecture = null
+              }
+
               private fun nouvelleSession() {
                   main.removeCallbacks(runSession)
-                  if (!actif) return
+                  if (!actif || !ecouteActive) return
+                  val l = langue ?: return
                   val st = strats[strategie]
                   try {
+                      if (!st.parSource && captureMicro && captureOn) arreterCapture()
                       if (reco == null || recoStrat != st) {
                           try { reco?.destroy() } catch (_: Exception) {}
                           reco = if (st.surAppareil && Build.VERSION.SDK_INT >= 31)
@@ -752,31 +1161,18 @@ jobs:
                           reco?.setRecognitionListener(ecouteur)
                           recoStrat = st
                       }
-                      val it = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
-                      it.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                      it.putExtra(RecognizerIntent.EXTRA_LANGUAGE, source.parole)
-                      it.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                      it.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-                      it.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
-
+                      val it = intentBase(l.parole, true)
                       val ancienne = lecture
-                      if (st.sonInterne && Build.VERSION.SDK_INT >= 33) {
+                      if (st.parSource && Build.VERSION.SDK_INT >= 33 && captureOn) {
                           val p = ParcelFileDescriptor.createPipe()
                           lecture = p[0]
                           ecriture = p[1]
-                          it.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE, p[0])
-                          it.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_CHANNEL_COUNT, 1)
-                          it.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_ENCODING, AudioFormat.ENCODING_PCM_16BIT)
-                          it.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_SAMPLING_RATE, TAUX)
-                          if (st.segmente) {
-                              it.putExtra(RecognizerIntent.EXTRA_SEGMENTED_SESSION, RecognizerIntent.EXTRA_AUDIO_SOURCE)
-                          }
+                          mettreSource(it, p[0], st.segmente)
                       } else {
                           ecriture = null
                           lecture = null
                       }
                       try { ancienne?.close() } catch (_: Exception) {}
-
                       dernierSigne = SystemClock.elapsedRealtime()
                       enCours = true
                       reco?.startListening(it)
@@ -797,7 +1193,7 @@ jobs:
               private val ecouteur = object : RecognitionListener {
                   override fun onReadyForSpeech(params: Bundle?) {
                       dernierSigne = SystemClock.elapsedRealtime()
-                      if (resultatsDansStrategie || strategie == strats.size - 1 || !interne) couleurBulle(VERT)
+                      if (resultatsDansStrategie || strategie == strats.size - 1) couleurBulle(VERT)
                   }
                   override fun onBeginningOfSpeech() { dernierSigne = SystemClock.elapsedRealtime() }
                   override fun onRmsChanged(rmsdB: Float) { dernierSigne = SystemClock.elapsedRealtime() }
@@ -812,19 +1208,13 @@ jobs:
 
                   override fun onResults(results: Bundle?) {
                       enCours = false
-                      texte(results)?.let {
-                          reussite()
-                          finale(it)
-                      }
+                      recu(results)
                       relancer(20)
                   }
 
                   override fun onSegmentResults(segmentResults: Bundle) {
                       dernierSigne = SystemClock.elapsedRealtime()
-                      texte(segmentResults)?.let {
-                          reussite()
-                          finale(it)
-                      }
+                      recu(segmentResults)
                   }
 
                   override fun onEndOfSegmentedSession() {
@@ -838,14 +1228,24 @@ jobs:
                   }
               }
 
-              private fun reussite() {
+              private fun recu(b: Bundle?) {
+                  if (!ecouteActive) return
+                  val t = texte(b) ?: return
                   resultatsDansStrategie = true
                   erreursSuite = 0
+                  derniereReussite = SystemClock.elapsedRealtime()
                   couleurBulle(VERT)
+                  val conf = b?.getFloatArray(SpeechRecognizer.CONFIDENCE_SCORES)?.firstOrNull() ?: -1f
+                  if (conf > 0f && conf < 0.35f) faiblesSuite++ else if (conf >= 0.35f) faiblesSuite = 0
+                  finale(t)
+                  if (auto && detectionPossible && faiblesSuite >= 8 && SystemClock.elapsedRealtime() > verrouJusqua) {
+                      info("La langue semble avoir changé : je cherche à nouveau.")
+                      lancerDetection()
+                  }
               }
 
               private fun gererErreur(code: Int) {
-                  if (!actif) return
+                  if (!actif || !ecouteActive) return
                   when (code) {
                       SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
                           relancer(20)
@@ -864,7 +1264,6 @@ jobs:
                       }
                   }
                   erreursSuite++
-                  // 3 = audio, 5 = client, 11 = serveur coupé, 12/13 = langue non disponible, 14 = vérification impossible
                   val grave = code == 3 || code == 5 || code == 11 || code == 12 || code == 13 || code == 14
                   if (!resultatsDansStrategie && strategie < strats.size - 1 && (grave || erreursSuite >= 3)) {
                       strategie++
@@ -872,7 +1271,8 @@ jobs:
                       resultatsDansStrategie = false
                       try { reco?.destroy() } catch (_: Exception) {}
                       reco = null
-                      if (!strats[strategie].sonInterne && interne) {
+                      if (!strats[strategie].parSource) {
+                          detectionPossible = false
                           info("Ce téléphone refuse l'écoute interne : j'écoute par le micro (monte le volume).")
                       }
                       couleurBulle(ORANGE)
@@ -880,32 +1280,56 @@ jobs:
                       return
                   }
                   if (code == SpeechRecognizer.ERROR_NETWORK || code == SpeechRecognizer.ERROR_NETWORK_TIMEOUT || code == SpeechRecognizer.ERROR_SERVER) {
-                      tvOrig?.text = "Connexion faible…"
+                      tvOrig?.text = "Connexion faible..."
                   }
                   if (erreursSuite >= 6) couleurBulle(ROUGE)
                   relancer(if (erreursSuite > 5) 1500L else 250L)
               }
 
-              // ------------------------- TRADUCTION -------------------------
+              // ============================ TRADUCTION ============================
               private fun traduire(t: String, ok: (String) -> Unit) {
                   val tr = traducteur
                   if (tr == null) {
                       ok(t)
                       return
                   }
+                  if (!traducteurPret) {
+                      ok("[$t]")
+                      return
+                  }
                   tr.translate(t)
                       .addOnSuccessListener { r -> ok(r) }
-                                            .addOnFailureListener { ok("[$t]") }
+                      .addOnFailureListener { ok("[$t]") }
+              }
+
+              // À chaque pause de la personne (plus d'une seconde sans nouveaux mots),
+              // la phrase en cours est posée comme une ligne : on suit son rythme.
+              private fun poserPause() {
+                  if (!actif || !ecouteActive || partielTrad.isEmpty()) return
+                  lignes.addLast(partielTrad)
+                  while (lignes.size > 3) lignes.removeFirst()
+                  partielTrad = ""
+                  ligneDePause = true
+                  rafraichir()
+                  glisser()
               }
 
               private fun partiel(t: String) {
                   tvOrig?.text = t
+                  main.removeCallbacks(validerPause)
+                  main.postDelayed(validerPause, 1100)
+                  // La personne reprend la même phrase : on retire la ligne posée pendant la pause,
+                  // le texte en cours la contient déjà.
+                  if (ligneDePause && lignes.isNotEmpty()) {
+                      lignes.removeLast()
+                      ligneDePause = false
+                  }
                   val now = SystemClock.elapsedRealtime()
-                  if (now - dernierPartiel < 300) return
+                  if (now - dernierPartiel < 150) return
                   dernierPartiel = now
                   val seq = ++seqPartiel
                   traduire(t) { r ->
-                      if (seq == seqPartiel && actif) {
+                      if (seq == seqPartiel && actif && ecouteActive) {
                           partielTrad = r
                           rafraichir()
                       }
@@ -916,13 +1340,27 @@ jobs:
                   tvOrig?.text = t
                   val seq = ++seqPartiel
                   traduire(t) { r ->
-                      if (!actif) return@traduire
+                      if (!actif || !ecouteActive) return@traduire
                       if (seq == seqPartiel) partielTrad = ""
+                      main.removeCallbacks(validerPause)
+                      if (ligneDePause && lignes.isNotEmpty()) lignes.removeLast()
+                      ligneDePause = false
+                      if (lignes.lastOrNull() == r) return@traduire
                       lignes.addLast(r)
-                      while (lignes.size > 2) lignes.removeFirst()
+                      while (lignes.size > 3) lignes.removeFirst()
                       rafraichir()
+                      glisser()
                       parler(r)
                   }
+              }
+
+              // Chaque nouvelle phrase glisse doucement vers le haut, sans à-coup.
+              private fun glisser() {
+                  val v = tvTrad ?: return
+                  v.animate().cancel()
+                  v.alpha = 0.55f
+                  v.translationY = dp(8f).toFloat()
+                  v.animate().alpha(1f).translationY(0f).setDuration(220).start()
               }
 
               private fun rafraichir() {
@@ -942,9 +1380,15 @@ jobs:
                   tvTrad?.text = sb
               }
 
-              // ------------------------- FENÊTRES FLOTTANTES -------------------------
+              // ======================== FENETRES FLOTTANTES ========================
               private fun couleurBulle(c: Int) {
-                  (bulle?.background as? GradientDrawable)?.setColor(c)
+                  // L'anneau autour de la bulle montre l'état : vert, orange ou rouge.
+                  (bulle?.background as? GradientDrawable)?.setStroke(dp(4f), c)
+              }
+
+              private fun majTitre() {
+                  val nom = langue?.nom ?: "recherche..."
+                  tvTitre?.text = if (auto) "AUTO : $nom > Français" else "$nom > Français"
               }
 
               private fun info(m: String) {
@@ -953,16 +1397,21 @@ jobs:
               }
 
               @SuppressLint("ClickableViewAccessibility")
-              private fun rendreDeplacable(poignee: View, fenetre: View, lp: WindowManager.LayoutParams, auToucher: (() -> Unit)?) {
+              private fun rendreDeplacable(
+                  poignee: View, fenetre: View, lp: WindowManager.LayoutParams,
+                  auToucher: (() -> Unit)?, auLong: (() -> Unit)? = null
+              ) {
                   var ox = 0
                   var oy = 0
                   var tx = 0f
                   var ty = 0f
                   var bouge = false
+                  var debut = 0L
                   poignee.setOnTouchListener { _, e ->
                       when (e.action) {
                           MotionEvent.ACTION_DOWN -> {
                               ox = lp.x; oy = lp.y; tx = e.rawX; ty = e.rawY; bouge = false
+                              debut = SystemClock.elapsedRealtime()
                               true
                           }
                           MotionEvent.ACTION_MOVE -> {
@@ -970,14 +1419,20 @@ jobs:
                               val dy = e.rawY - ty
                               if (abs(dx) > 12f || abs(dy) > 12f) bouge = true
                               if (bouge) {
-                                  lp.x = ox + dx.toInt()
-                                  lp.y = oy + dy.toInt()
+                                  val ecran = resources.displayMetrics
+                                  val largeur = if (fenetre.width > 0) fenetre.width else dp(58f)
+                                  val hauteur = if (fenetre.height > 0) fenetre.height else dp(58f)
+                                  lp.x = (ox + dx.toInt()).coerceIn(0, maxOf(0, ecran.widthPixels - largeur))
+                                  lp.y = (oy + dy.toInt()).coerceIn(0, maxOf(0, ecran.heightPixels - hauteur))
                                   try { wm.updateViewLayout(fenetre, lp) } catch (_: Exception) {}
                               }
                               true
                           }
                           MotionEvent.ACTION_UP -> {
-                              if (!bouge) auToucher?.invoke()
+                              if (!bouge) {
+                                  val long = SystemClock.elapsedRealtime() - debut > 600
+                                  if (long && auLong != null) auLong.invoke() else auToucher?.invoke()
+                              }
                               true
                           }
                           else -> false
@@ -987,15 +1442,15 @@ jobs:
 
               private fun creerBulle() {
                   val cote = dp(58f)
-                  val b = TextView(this)
-                  b.text = "🌐"
-                  b.textSize = 26f
-                  b.gravity = Gravity.CENTER
-                  b.background = GradientDrawable().apply {
-                      shape = GradientDrawable.OVAL
-                      setColor(GRIS)
-                      setStroke(dp(3f), Color.WHITE)
-                  }
+                  val b = ImageView(this)
+                  b.setImageResource(R.drawable.ic_launcher)
+                  b.scaleType = ImageView.ScaleType.FIT_CENTER
+                  b.setPadding(dp(5f), dp(5f), dp(5f), dp(5f))
+                  val rond = GradientDrawable()
+                  rond.shape = GradientDrawable.OVAL
+                  rond.setColor(0x33000000)
+                  rond.setStroke(dp(4f), GRIS)
+                  b.background = rond
                   b.elevation = dp(6f).toFloat()
                   val lp = WindowManager.LayoutParams(
                       cote, cote,
@@ -1006,7 +1461,7 @@ jobs:
                   lp.gravity = Gravity.TOP or Gravity.START
                   lp.x = dp(8f)
                   lp.y = dp(170f)
-                  rendreDeplacable(b, b, lp) { basculerPanneau() }
+                  rendreDeplacable(b, b, lp, { basculerMenu() }, { ouvrirBarre() })
                   wm.addView(b, lp)
                   bulle = b
               }
@@ -1014,47 +1469,96 @@ jobs:
               private fun bouton(t: String, action: () -> Unit): TextView {
                   val v = TextView(this)
                   v.text = t
-                  v.setTextColor(Color.WHITE)
-                  v.textSize = 15f
-                  v.setPadding(dp(10f), dp(4f), dp(10f), dp(4f))
+                  v.setTextColor(0xFFE3E8FF.toInt())
+                  v.textSize = 14f
+                  v.gravity = Gravity.CENTER
+                  v.background = fond(0x26FFFFFF, dp(14f).toFloat())
+                  v.setPadding(dp(8f), dp(3f), dp(8f), dp(3f))
                   v.setOnClickListener { action() }
                   return v
               }
 
+              private var lpPanneau: WindowManager.LayoutParams? = null
+
+              // Envoie le panneau en haut ou en bas de l'écran d'un seul geste.
+              private fun haurBas() {
+                  val p = panneau ?: return
+                  val lp = lpPanneau ?: return
+                  val ecran = resources.displayMetrics
+                  val haut = (ecran.heightPixels * 0.10f).toInt()
+                  val bas = maxOf(0, ecran.heightPixels - p.height - dp(150f))
+                  lp.y = if (lp.y > ecran.heightPixels / 2) haut else bas
+                  try { wm.updateViewLayout(p, lp) } catch (_: Exception) {}
+              }
+
               private fun creerPanneau() {
-                  val pad = dp(10f)
+                  val pad = dp(12f)
                   val pn = LinearLayout(this)
                   pn.orientation = LinearLayout.VERTICAL
-                  pn.setPadding(pad, dp(4f), pad, pad)
-                  pn.background = fond(0xD9101426.toInt(), dp(16f).toFloat())
+                  pn.setPadding(pad, dp(8f), pad, dp(10f))
+                  val verre = GradientDrawable()
+                  verre.setColor(0xE60D1222.toInt())
+                  verre.cornerRadius = dp(18f).toFloat()
+                  verre.setStroke(dp(1f), 0x6680FFE8)
+                  pn.background = verre
+                  pn.elevation = dp(10f).toFloat()
+
+                  // Petite poignée grise en haut : montre qu'on peut déplacer le panneau.
+                  val poignee = View(this)
+                  poignee.background = fond(0x66FFFFFF, dp(3f).toFloat())
+                  val lpPoignee = LinearLayout.LayoutParams(dp(40f), dp(4f))
+                  lpPoignee.gravity = Gravity.CENTER_HORIZONTAL
+                  lpPoignee.bottomMargin = dp(6f)
+                  pn.addView(poignee, lpPoignee)
 
                   val entete = LinearLayout(this)
                   entete.orientation = LinearLayout.HORIZONTAL
                   entete.gravity = Gravity.CENTER_VERTICAL
                   val titre = TextView(this)
-                  titre.text = "⠿ ${source.nom} → ${cible.nom}"
-                  titre.setTextColor(0xFF80FFE8.toInt())
-                  titre.textSize = 12f
-                  titre.setPadding(0, dp(6f), 0, dp(6f))
-                  entete.addView(titre, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-                  entete.addView(bouton("A−") { changerTaille(-2f) })
-                  entete.addView(bouton("A+") { changerTaille(2f) })
-                  entete.addView(bouton("▾") { basculerPanneau() })
-                  entete.addView(bouton("✕") { stopSelf() })
+                  titre.setTextColor(0xFF0D1222.toInt())
+                  titre.textSize = 11f
+                  titre.setTypeface(null, Typeface.BOLD)
+                  titre.isSingleLine = true
+                  titre.ellipsize = TextUtils.TruncateAt.END
+                  titre.background = fond(0xFF80FFE8.toInt(), dp(10f).toFloat())
+                  titre.setPadding(dp(8f), dp(2f), dp(8f), dp(2f))
+                  val lpTitre = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                  lpTitre.rightMargin = dp(6f)
+                  entete.addView(titre, lpTitre)
+                  fun ajouter(v: TextView) {
+                      val l = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                      l.leftMargin = dp(4f)
+                      entete.addView(v, l)
+                  }
+                  ajouter(bouton("✍️") { ouvrirBarre() })
+                  ajouter(bouton("🔍") { lancerDetection() })
+                  ajouter(bouton("📌") { haurBas() })
+                  ajouter(bouton("A-") { changerTaille(-2f) })
+                  ajouter(bouton("A+") { changerTaille(2f) })
+                  ajouter(bouton("▾") { basculerPanneau() })
+                  ajouter(bouton("✕") { stopSelf() })
 
                   val trad = TextView(this)
                   trad.setTextColor(Color.WHITE)
                   trad.textSize = taille
                   trad.setTypeface(null, Typeface.BOLD)
                   trad.setShadowLayer(4f, 0f, 1f, Color.BLACK)
-                  trad.text = "J'écoute… lance la vidéo."
+                  trad.setLineSpacing(0f, 1.15f)
+                  // Hauteur stable : le panneau ne saute pas à chaque phrase,
+                  // la phrase la plus récente arrive toujours en bas.
+                  trad.minLines = 3
+                  trad.maxLines = 5
+                  trad.gravity = Gravity.BOTTOM or Gravity.START
+                  trad.setPadding(0, dp(8f), 0, 0)
+                  trad.text = "Démarrage..."
 
                   val orig = TextView(this)
-                  orig.setTextColor(0xFFB0B8D8.toInt())
+                  orig.setTextColor(0xFF9AA4C8.toInt())
                   orig.textSize = 12f
+                  orig.setTypeface(null, Typeface.ITALIC)
                   orig.isSingleLine = true
                   orig.ellipsize = TextUtils.TruncateAt.START
-                  orig.setPadding(0, dp(4f), 0, 0)
+                  orig.setPadding(0, dp(6f), 0, 0)
 
                   pn.addView(entete)
                   pn.addView(trad)
@@ -1070,12 +1574,17 @@ jobs:
                   )
                   lp.gravity = Gravity.TOP or Gravity.START
                   lp.x = dp(8f)
-                  lp.y = (ecran.heightPixels * 0.58f).toInt()
-                  rendreDeplacable(titre, pn, lp, null)
+                  // En haut par défaut : le chat et la zone d'écriture en bas restent libres.
+                  lp.y = (ecran.heightPixels * 0.10f).toInt()
+                  // Tout le panneau se déplace avec le doigt (sauf les boutons).
+                  rendreDeplacable(pn, pn, lp, null)
                   wm.addView(pn, lp)
                   panneau = pn
+                  lpPanneau = lp
+                  tvTitre = titre
                   tvTrad = trad
                   tvOrig = orig
+                  majTitre()
               }
 
               private fun basculerPanneau() {
@@ -1088,13 +1597,702 @@ jobs:
                   tvTrad?.textSize = taille
               }
 
+              // ======================== BARRE D'ECRITURE ========================
+              // On écrit en français, la bulle traduit dans la langue du live,
+              // puis on copie pour coller dans les commentaires.
+              private var barre: LinearLayout? = null
+              private var lpBarre: WindowManager.LayoutParams? = null
+              private var etMessage: EditText? = null
+              private var tvResultat: TextView? = null
+              private var btTraduire: TextView? = null
+              private var traducteurRetour: Translator? = null
+              private var codeRetour = ""
+              private var cibleReponse: Langue? = null
+              private var recoVoix: SpeechRecognizer? = null
+              private var dicteeReprendre = false
+              private var dicteeMicro = false
+              private var ttsRep: TextToSpeech? = null
+              private var menu: LinearLayout? = null
+
+              // ---------- petits outils d'affichage : grands boutons faciles à toucher ----------
+              private fun grosBouton(t: String, couleur: Int, action: () -> Unit): TextView {
+                  val v = TextView(this)
+                  v.text = t
+                  v.setTextColor(Color.WHITE)
+                  v.textSize = 15f
+                  v.setTypeface(null, Typeface.BOLD)
+                  v.gravity = Gravity.CENTER
+                  v.minHeight = dp(50f)
+                  v.background = fond(couleur, dp(14f).toFloat())
+                  v.setPadding(dp(8f), dp(6f), dp(8f), dp(6f))
+                  v.setOnClickListener { action() }
+                  return v
+              }
+
+              private fun rangee(a: View, b: View): LinearLayout {
+                  val l = LinearLayout(this)
+                  l.orientation = LinearLayout.HORIZONTAL
+                  val p1 = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                  p1.rightMargin = dp(8f)
+                  l.addView(a, p1)
+                  l.addView(b, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                  return l
+              }
+
+              private fun rangeeChips(noms: List<String>, choisi: Int, auChoix: (Int) -> Unit): HorizontalScrollView {
+                  val defil = HorizontalScrollView(this)
+                  defil.isHorizontalScrollBarEnabled = false
+                  val ligne = LinearLayout(this)
+                  ligne.orientation = LinearLayout.HORIZONTAL
+                  val vues = mutableListOf<TextView>()
+                  fun peindre(sel: Int) {
+                      vues.forEachIndexed { i, v ->
+                          v.background = fond(if (i == sel) 0xFF80FFE8.toInt() else 0x26FFFFFF, dp(16f).toFloat())
+                          v.setTextColor(if (i == sel) 0xFF0D1222.toInt() else Color.WHITE)
+                      }
+                  }
+                  noms.forEachIndexed { i, n ->
+                      val v = TextView(this)
+                      v.text = n
+                      v.textSize = 14f
+                      v.minHeight = dp(40f)
+                      v.gravity = Gravity.CENTER
+                      v.setPadding(dp(14f), dp(6f), dp(14f), dp(6f))
+                      v.setOnClickListener {
+                          peindre(i)
+                          auChoix(i)
+                      }
+                      val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                      lp.rightMargin = dp(6f)
+                      ligne.addView(v, lp)
+                      vues.add(v)
+                  }
+                  peindre(choisi)
+                  defil.addView(ligne)
+                  return defil
+              }
+
+              // ---------- je parle en français ----------
+              private fun dicter() {
+                  if (recoVoix != null) {
+                      finDictee()
+                      return
+                  }
+                  dicteeReprendre = ecouteActive
+                  arreterEcoute()
+                  dicteeMicro = captureMicro && captureOn
+                  if (dicteeMicro) arreterCapture()
+                  tvResultat?.text = "🎤 Parle en français, je t'écoute..."
+                  try {
+                      val r = SpeechRecognizer.createSpeechRecognizer(this)
+                      recoVoix = r
+                      r.setRecognitionListener(object : RecognitionListener {
+                          override fun onReadyForSpeech(params: Bundle?) {}
+                          override fun onBeginningOfSpeech() {}
+                          override fun onRmsChanged(rmsdB: Float) {}
+                          override fun onBufferReceived(buffer: ByteArray?) {}
+                          override fun onEndOfSpeech() {}
+                          override fun onEvent(eventType: Int, params: Bundle?) {}
+                          override fun onPartialResults(partialResults: Bundle?) {
+                              texte(partialResults)?.let { etMessage?.setText(it) }
+                          }
+                          override fun onResults(results: Bundle?) {
+                              val t = texte(results)
+                              finDictee()
+                              if (t != null) {
+                                  etMessage?.setText(t)
+                                  etMessage?.setSelection(t.length)
+                                  traduireMessage()
+                              } else {
+                                  tvResultat?.text = "Je n'ai pas entendu. Appuie sur 🎤 et réessaie."
+                              }
+                          }
+                          override fun onError(error: Int) {
+                              finDictee()
+                              tvResultat?.text = "Je n'ai pas compris. Appuie sur 🎤 et réessaie."
+                          }
+                      })
+                      r.startListening(intentBase("fr-FR", true))
+                  } catch (e: Exception) {
+                      finDictee()
+                      tvResultat?.text = "Micro indisponible."
+                  }
+              }
+
+              private fun finDictee() {
+                  try { recoVoix?.destroy() } catch (_: Exception) {}
+                  recoVoix = null
+                  if (dicteeMicro) {
+                      dicteeMicro = false
+                      demarrerCapture(false)
+                  }
+                  if (dicteeReprendre && langue != null) {
+                      dicteeReprendre = false
+                      demarrerEcoute()
+                  }
+              }
+
+              // ---------- la bulle prononce ma réponse dans l'autre langue ----------
+              private fun ecouterResultat() {
+                  val texte = tvResultat?.text?.toString() ?: return
+                  if (texte.isBlank() || texte.startsWith("La traduction apparaîtra")) return
+                  val l = cibleReponse ?: langue ?: return
+                  val t = ttsRep
+                  if (t == null) {
+                      ttsRep = TextToSpeech(this) { st ->
+                          if (st == TextToSpeech.SUCCESS) {
+                              ttsRep?.setLanguage(Locale.forLanguageTag(l.parole))
+                              ttsRep?.speak(texte, TextToSpeech.QUEUE_FLUSH, null, "rep")
+                          }
+                      }
+                  } else {
+                      t.setLanguage(Locale.forLanguageTag(l.parole))
+                      t.speak(texte, TextToSpeech.QUEUE_FLUSH, null, "rep")
+                  }
+              }
+
+              // ---------- le menu de la bulle : tout se fait d'ici ----------
+              private fun basculerMenu() {
+                  if (menu != null) {
+                      fermerMenu()
+                      return
+                  }
+                  val pad = dp(12f)
+                  val m = LinearLayout(this)
+                  m.orientation = LinearLayout.VERTICAL
+                  m.setPadding(pad, dp(10f), pad, dp(12f))
+                  val verre = GradientDrawable()
+                  verre.setColor(0xF20D1222.toInt())
+                  verre.cornerRadius = dp(20f).toFloat()
+                  verre.setStroke(dp(1f), 0x667F77DD)
+                  m.background = verre
+                  m.elevation = dp(14f).toFloat()
+
+                  val titre = TextView(this)
+                  titre.text = "Lushi Traducteur"
+                  titre.setTextColor(0xFFCECBF6.toInt())
+                  titre.textSize = 13f
+                  titre.setTypeface(null, Typeface.BOLD)
+                  m.addView(titre)
+
+                  val sousTitres = grosBouton(if (panneau?.visibility == View.VISIBLE) "📖 Cacher sous-titres" else "📖 Sous-titres", 0xFF00897B.toInt()) {
+                      basculerPanneau()
+                      fermerMenu()
+                  }
+                  val ecrire = grosBouton("✍️ Écrire / 🎤 Parler", 0xFF534AB7.toInt()) {
+                      fermerMenu()
+                      ouvrirBarre()
+                  }
+                  m.addView(rangee(sousTitres, ecrire), LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).also { it.topMargin = dp(8f) })
+
+                  val voixBt = grosBouton(if (voix) "🔊 Voix : oui" else "🔇 Voix : non", 0xFF6A1B9A.toInt()) {
+                      voix = !voix
+                      if (voix && tts == null) preparerVoix()
+                      if (!voix) try { tts?.stop() } catch (_: Exception) {}
+                      fermerMenu()
+                  }
+                  val arret = grosBouton("✕ Arrêter", 0xFFC62828.toInt()) { stopSelf() }
+                  m.addView(rangee(voixBt, arret), LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).also { it.topMargin = dp(8f) })
+
+                  val lireEcranBt = grosBouton("📷 Lire les textes de l'écran", 0xFFEF6C00.toInt()) {
+                      fermerMenu()
+                      ouvrirPanneauEcran()
+                      lireEcran()
+                  }
+                  m.addView(lireEcranBt, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).also { it.topMargin = dp(8f) })
+
+                  val etiquette = TextView(this)
+                  etiquette.text = "Langue du live"
+                  etiquette.setTextColor(0xFF9AA4C8.toInt())
+                  etiquette.textSize = 12f
+                  etiquette.setPadding(0, dp(12f), 0, dp(4f))
+                  m.addView(etiquette)
+                  val noms = listOf("🔍 Automatique") + LANGUES.map { it.nom }
+                  val actuel = if (auto) 0 else LANGUES.indexOfFirst { it == langue } + 1
+                  m.addView(rangeeChips(noms, actuel.coerceAtLeast(0)) { i ->
+                      fermerMenu()
+                      if (i == 0) {
+                          lancerDetection()
+                      } else {
+                          auto = false
+                          arreterEcoute()
+                          choisir(LANGUES[i - 1])
+                      }
+                  })
+
+                  val ecran = resources.displayMetrics
+                  val lp = WindowManager.LayoutParams(
+                      ecran.widthPixels - dp(24f),
+                      WindowManager.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                      PixelFormat.TRANSLUCENT
+                  )
+                  lp.gravity = Gravity.TOP or Gravity.START
+                  lp.x = dp(12f)
+                  lp.y = (ecran.heightPixels * 0.25f).toInt()
+                  rendreDeplacable(m, m, lp, null)
+                  try {
+                      wm.addView(m, lp)
+                      menu = m
+                  } catch (_: Exception) {}
+              }
+
+              private fun fermerMenu() {
+                  val m = menu ?: return
+                  try { wm.removeView(m) } catch (_: Exception) {}
+                  menu = null
+              }
+
+              private fun ouvrirBarre() {
+                  if (barre != null) {
+                      fermerBarre()
+                      return
+                  }
+                  val pad = dp(12f)
+                  val br = LinearLayout(this)
+                  br.orientation = LinearLayout.VERTICAL
+                  br.setPadding(pad, dp(8f), pad, dp(10f))
+                  val verre = GradientDrawable()
+                  verre.setColor(0xF2141A30.toInt())
+                  verre.cornerRadius = dp(18f).toFloat()
+                  verre.setStroke(dp(1f), 0x66FFD54F)
+                  br.background = verre
+                  br.elevation = dp(12f).toFloat()
+
+                  val poignee = View(this)
+                  poignee.background = fond(0x66FFFFFF, dp(3f).toFloat())
+                  val lpPoignee = LinearLayout.LayoutParams(dp(40f), dp(4f))
+                  lpPoignee.gravity = Gravity.CENTER_HORIZONTAL
+                  lpPoignee.bottomMargin = dp(6f)
+                  br.addView(poignee, lpPoignee)
+
+                  val entete = LinearLayout(this)
+                  entete.orientation = LinearLayout.HORIZONTAL
+                  entete.gravity = Gravity.CENTER_VERTICAL
+                  val titre = TextView(this)
+                  titre.text = "✍️ Écris en français"
+                  titre.setTextColor(0xFF141A30.toInt())
+                  titre.textSize = 11f
+                  titre.setTypeface(null, Typeface.BOLD)
+                  titre.background = fond(0xFFFFD54F.toInt(), dp(10f).toFloat())
+                  titre.setPadding(dp(8f), dp(2f), dp(8f), dp(2f))
+                  entete.addView(titre, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                  entete.addView(bouton("✕") { fermerBarre() })
+                  br.addView(entete)
+
+                  val et = EditText(this)
+                  et.hint = "Ton message en français..."
+                  et.setHintTextColor(0xFF7F88AA.toInt())
+                  et.setTextColor(Color.WHITE)
+                  et.textSize = 16f
+                  et.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+                  et.maxLines = 3
+                  et.background = fond(0x22FFFFFF, dp(12f).toFloat())
+                  et.setPadding(dp(10f), dp(8f), dp(10f), dp(8f))
+                  et.setOnTouchListener { _, _ ->
+                      rendreFocusable(true)
+                      false
+                  }
+                  val lpEt = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                  lpEt.topMargin = dp(8f)
+                  br.addView(et, lpEt)
+
+                  // Choix de la langue de ma réponse.
+                  val options = mutableListOf<Pair<String, Langue?>>()
+                  options.add(Pair("Langue du live", null))
+                  LANGUES.filter { it.code != CIBLE }.forEach { options.add(Pair(it.nom, it)) }
+                  options.add(Pair("Garder en français", LANGUES.first { it.code == CIBLE }))
+                  val choixActuel = options.indexOfFirst { it.second == cibleReponse }.coerceAtLeast(0)
+                  br.addView(rangeeChips(options.map { it.first }, choixActuel) { i ->
+                      cibleReponse = options[i].second
+                      majBoutonTraduire()
+                  }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).also { it.topMargin = dp(8f) })
+
+                  val bParler = grosBouton("🎤 Parler", 0xFFE53935.toInt()) { dicter() }
+                  val bTrad = grosBouton("Traduire", TURQUOISE) { traduireMessage() }
+                  val bCopier = grosBouton("📋 Copier", 0xFF3949AB.toInt()) { copierResultat() }
+                  val bEcouter = grosBouton("🔊 Écouter", 0xFF6A1B9A.toInt()) { ecouterResultat() }
+                  br.addView(rangee(bParler, bTrad), LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).also { it.topMargin = dp(8f) })
+                  br.addView(rangee(bCopier, bEcouter), LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).also { it.topMargin = dp(8f) })
+
+                  val res = TextView(this)
+                  res.setTextColor(0xFFFFE082.toInt())
+                  res.textSize = 16f
+                  res.setTextIsSelectable(true)
+                  res.setPadding(0, dp(8f), 0, 0)
+                  res.text = "La traduction apparaîtra ici."
+                  br.addView(res)
+
+                  val ecran = resources.displayMetrics
+                  val lp = WindowManager.LayoutParams(
+                      ecran.widthPixels - dp(16f),
+                      WindowManager.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                      PixelFormat.TRANSLUCENT
+                  )
+                  lp.gravity = Gravity.TOP or Gravity.START
+                  lp.x = dp(8f)
+                  lp.y = (ecran.heightPixels * 0.30f).toInt()
+                  lp.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE or WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN
+                  rendreDeplacable(br, br, lp, null)
+                  try {
+                      wm.addView(br, lp)
+                  } catch (e: Exception) {
+                      return
+                  }
+                  barre = br
+                  lpBarre = lp
+                  etMessage = et
+                  tvResultat = res
+                  btTraduire = bTrad
+                  majBoutonTraduire()
+                  main.postDelayed({
+                      et.requestFocus()
+                      getSystemService(InputMethodManager::class.java)?.showSoftInput(et, InputMethodManager.SHOW_IMPLICIT)
+                  }, 250)
+              }
+
+              private fun majBoutonTraduire() {
+                  val l = cibleReponse ?: langue
+                  btTraduire?.text = when {
+                      l == null -> "Traduire"
+                      l.code == CIBLE -> "Garder en français"
+                      else -> "Traduire en ${l.nom}"
+                  }
+              }
+
+              // Quand on a fini, la barre lâche le clavier pour qu'on puisse écrire dans le live.
+              private fun rendreFocusable(oui: Boolean) {
+                  val br = barre ?: return
+                  val lp = lpBarre ?: return
+                  val avant = lp.flags
+                  lp.flags = if (oui) WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                  else WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                  if (lp.flags != avant) {
+                      try { wm.updateViewLayout(br, lp) } catch (_: Exception) {}
+                  }
+                  if (!oui) {
+                      etMessage?.let { getSystemService(InputMethodManager::class.java)?.hideSoftInputFromWindow(it.windowToken, 0) }
+                  }
+              }
+
+              private fun traduireMessage() {
+                  val texte = etMessage?.text?.toString()?.trim() ?: ""
+                  if (texte.isEmpty()) {
+                      tvResultat?.text = "Écris d'abord ton message en français."
+                      return
+                  }
+                  val l = cibleReponse ?: langue
+                  if (l == null) {
+                      tvResultat?.text = "Attends que la langue du live soit reconnue, ou choisis une langue ci-dessus."
+                      return
+                  }
+                  majBoutonTraduire()
+                  if (l.code == CIBLE) {
+                      montrerResultat(texte)
+                      return
+                  }
+                  if (traducteurRetour == null || codeRetour != l.code) {
+                      try { traducteurRetour?.close() } catch (_: Exception) {}
+                      traducteurRetour = Translation.getClient(
+                          TranslatorOptions.Builder().setSourceLanguage(CIBLE).setTargetLanguage(l.code).build()
+                      )
+                      codeRetour = l.code
+                  }
+                  val tr = traducteurRetour ?: return
+                  tvResultat?.text = "Traduction en ${l.nom}..."
+                  tr.downloadModelIfNeeded(DownloadConditions.Builder().build())
+                      .addOnSuccessListener {
+                          tr.translate(texte)
+                              .addOnSuccessListener { r -> montrerResultat(r) }
+                              .addOnFailureListener { tvResultat?.text = "Traduction impossible. Réessaie." }
+                      }
+                      .addOnFailureListener { tvResultat?.text = "Téléchargement de la langue impossible. Vérifie Internet." }
+              }
+
+              private fun montrerResultat(r: String) {
+                  tvResultat?.text = r
+                  copierResultat()
+              }
+
+              private fun copierResultat() {
+                  val r = tvResultat?.text?.toString() ?: return
+                  if (r.isBlank() || r.startsWith("La traduction apparaîtra")) return
+                  val cm = getSystemService(ClipboardManager::class.java) ?: return
+                  cm.setPrimaryClip(ClipData.newPlainText("Lushi Traducteur", r))
+                  Toast.makeText(this, "Copié ! Colle-le dans les commentaires du live.", Toast.LENGTH_SHORT).show()
+                  rendreFocusable(false)
+              }
+
+              private fun fermerBarre() {
+                  val br = barre ?: return
+                  etMessage?.let { getSystemService(InputMethodManager::class.java)?.hideSoftInputFromWindow(it.windowToken, 0) }
+                  try { wm.removeView(br) } catch (_: Exception) {}
+                  barre = null
+                  lpBarre = null
+                  etMessage = null
+                  tvResultat = null
+                  btTraduire = null
+              }
+
+              // ======================== LECTURE DES TEXTES DE L'ECRAN ========================
+              // Prend une image de l'écran, lit les textes (sous-titres, titres, messages de
+              // l'interview...) et les traduit en français. Les fenêtres de la bulle sont ignorées.
+              private var panneauEcran: LinearLayout? = null
+              private var listeEcran: LinearLayout? = null
+              private var btAutoEcran: TextView? = null
+              private var ecranAuto = false
+              private var ecranOccupe = false
+              private val dejaVus = LinkedHashSet<String>()
+              private var lecteurTexte: TextRecognizer? = null
+              private var codeLecteur = ""
+              private val tourEcran = object : Runnable {
+                  override fun run() {
+                      if (ecranAuto && actif && panneauEcran != null) {
+                          lireEcran()
+                          main.postDelayed(this, 4000)
+                      }
+                  }
+              }
+
+              private fun lecteurPour(code: String): TextRecognizer {
+                  val voulu = when (code) {
+                      "ko", "ja", "zh", "hi" -> code
+                      else -> "latin"
+                  }
+                  val ancien = lecteurTexte
+                  if (ancien != null && codeLecteur == voulu) return ancien
+                  try { ancien?.close() } catch (_: Exception) {}
+                  val n = when (voulu) {
+                      "ko" -> TextRecognition.getClient(KoreanTextRecognizerOptions.Builder().build())
+                      "ja" -> TextRecognition.getClient(JapaneseTextRecognizerOptions.Builder().build())
+                      "zh" -> TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
+                      "hi" -> TextRecognition.getClient(DevanagariTextRecognizerOptions.Builder().build())
+                      else -> TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+                  }
+                  lecteurTexte = n
+                  codeLecteur = voulu
+                  return n
+              }
+
+              private fun zonesBulle(): List<Rect> {
+                  val zones = mutableListOf<Rect>()
+                  listOfNotNull<View>(bulle, panneau, barre, menu, panneauEcran).forEach { v ->
+                      if (v.visibility == View.VISIBLE && v.width > 0) {
+                          val pos = IntArray(2)
+                          v.getLocationOnScreen(pos)
+                          zones.add(Rect(pos[0], pos[1], pos[0] + v.width, pos[1] + v.height))
+                      }
+                  }
+                  return zones
+              }
+
+              private fun lireEcran() {
+                  if (ecranOccupe) return
+                  val pj = projection
+                  if (pj == null) {
+                      ajouterLigneEcran("Pour lire l'écran, lance la bulle avec « Son du téléphone ».", null)
+                      return
+                  }
+                  val l = langue
+                  if (l == null) {
+                      ajouterLigneEcran("Attends que la langue du live soit reconnue, ou choisis-la dans le menu.", null)
+                      return
+                  }
+                  ecranOccupe = true
+                  val m = resources.displayMetrics
+                  val w = m.widthPixels
+                  val h = m.heightPixels
+                  val zones = zonesBulle()
+                  val reader = try {
+                      ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
+                  } catch (e: Exception) {
+                      ecranOccupe = false
+                      ajouterLigneEcran("Lecture de l'écran impossible sur ce téléphone.", null)
+                      return
+                  }
+                  val vd: VirtualDisplay? = try {
+                      pj.createVirtualDisplay("lushi-ecran", w, h, m.densityDpi,
+                          DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader.surface, null, main)
+                  } catch (e: Exception) {
+                      try { reader.close() } catch (_: Exception) {}
+                      ecranOccupe = false
+                      ajouterLigneEcran("Lecture de l'écran impossible sur ce téléphone.", null)
+                      return
+                  }
+                  main.postDelayed({
+                      var bmp: Bitmap? = null
+                      try {
+                          val img = reader.acquireLatestImage()
+                          if (img != null) {
+                              val plan = img.planes[0]
+                              val large = plan.rowStride / plan.pixelStride
+                              val brut = Bitmap.createBitmap(large, h, Bitmap.Config.ARGB_8888)
+                              brut.copyPixelsFromBuffer(plan.buffer)
+                              bmp = if (large != w) Bitmap.createBitmap(brut, 0, 0, w, h) else brut
+                              img.close()
+                          }
+                      } catch (_: Exception) {}
+                      try { vd?.release() } catch (_: Exception) {}
+                      try { reader.close() } catch (_: Exception) {}
+                      val image = bmp
+                      if (image == null) {
+                          ecranOccupe = false
+                          return@postDelayed
+                      }
+                      lecteurPour(l.code).process(InputImage.fromBitmap(image, 0))
+                          .addOnSuccessListener { res ->
+                              val textes = res.textBlocks.filter { bloc ->
+                                  val b = bloc.boundingBox
+                                  b == null || zones.none { it.contains(b.centerX(), b.centerY()) }
+                              }.map { it.text.replace('\n', ' ').trim() }
+                              traiterTexteEcran(textes)
+                              ecranOccupe = false
+                          }
+                          .addOnFailureListener {
+                              ecranOccupe = false
+                              ajouterLigneEcran("Lecture du texte impossible (la première fois, il faut Internet).", null)
+                          }
+                  }, 350)
+              }
+
+              private fun traiterTexteEcran(textes: List<String>) {
+                  val nouveaux = textes.filter { t -> t.length >= 2 && t.any { it.isLetter() } && !dejaVus.contains(t) }
+                  if (nouveaux.isEmpty()) {
+                      if (!ecranAuto) ajouterLigneEcran("Aucun nouveau texte à l'écran.", null)
+                      return
+                  }
+                  nouveaux.take(12).forEach { t ->
+                      dejaVus.add(t)
+                      if (dejaVus.size > 400) dejaVus.remove(dejaVus.first())
+                      traduire(t) { fr -> ajouterLigneEcran(fr, t) }
+                  }
+              }
+
+              private fun ajouterLigneEcran(fr: String, orig: String?) {
+                  val liste = listeEcran ?: return
+                  val bloc = LinearLayout(this)
+                  bloc.orientation = LinearLayout.VERTICAL
+                  bloc.setPadding(0, dp(6f), 0, dp(6f))
+                  val t1 = TextView(this)
+                  t1.text = fr
+                  t1.setTextColor(Color.WHITE)
+                  t1.textSize = 15f
+                  t1.setTypeface(null, Typeface.BOLD)
+                  t1.setTextIsSelectable(false)
+                  bloc.addView(t1)
+                  if (orig != null && orig != fr) {
+                      val t2 = TextView(this)
+                      t2.text = orig
+                      t2.setTextColor(0xFF9AA4C8.toInt())
+                      t2.textSize = 12f
+                      t2.setTypeface(null, Typeface.ITALIC)
+                      bloc.addView(t2)
+                  }
+                  liste.addView(bloc, 0)
+                  while (liste.childCount > 40) liste.removeViewAt(liste.childCount - 1)
+              }
+
+              private fun ouvrirPanneauEcran() {
+                  if (panneauEcran != null) return
+                  val pad = dp(12f)
+                  val pe = LinearLayout(this)
+                  pe.orientation = LinearLayout.VERTICAL
+                  pe.setPadding(pad, dp(8f), pad, dp(10f))
+                  val verre = GradientDrawable()
+                  verre.setColor(0xEE0D1222.toInt())
+                  verre.cornerRadius = dp(18f).toFloat()
+                  verre.setStroke(dp(1f), 0x66FFB74D)
+                  pe.background = verre
+                  pe.elevation = dp(10f).toFloat()
+
+                  val entete = LinearLayout(this)
+                  entete.orientation = LinearLayout.HORIZONTAL
+                  entete.gravity = Gravity.CENTER_VERTICAL
+                  val titre = TextView(this)
+                  titre.text = "📷 Textes de l'écran"
+                  titre.setTextColor(0xFF2B1600.toInt())
+                  titre.textSize = 11f
+                  titre.setTypeface(null, Typeface.BOLD)
+                  titre.background = fond(0xFFFFB74D.toInt(), dp(10f).toFloat())
+                  titre.setPadding(dp(8f), dp(2f), dp(8f), dp(2f))
+                  entete.addView(titre, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                  fun ajouter(v: TextView) {
+                      val l = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                      l.leftMargin = dp(6f)
+                      entete.addView(v, l)
+                  }
+                  ajouter(bouton("Lire") { lireEcran() })
+                  val auto = bouton("Auto : non") {
+                      ecranAuto = !ecranAuto
+                      btAutoEcran?.text = if (ecranAuto) "Auto : oui" else "Auto : non"
+                      main.removeCallbacks(tourEcran)
+                      if (ecranAuto) main.post(tourEcran)
+                  }
+                  btAutoEcran = auto
+                  ajouter(auto)
+                  ajouter(bouton("✕") { fermerPanneauEcran() })
+                  pe.addView(entete)
+
+                  val defil = ScrollView(this)
+                  val liste = LinearLayout(this)
+                  liste.orientation = LinearLayout.VERTICAL
+                  defil.addView(liste)
+                  val lpDefil = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(200f))
+                  lpDefil.topMargin = dp(6f)
+                  pe.addView(defil, lpDefil)
+
+                  val ecran = resources.displayMetrics
+                  val lp = WindowManager.LayoutParams(
+                      ecran.widthPixels - dp(16f),
+                      WindowManager.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                      PixelFormat.TRANSLUCENT
+                  )
+                  lp.gravity = Gravity.TOP or Gravity.START
+                  lp.x = dp(8f)
+                  lp.y = (ecran.heightPixels * 0.45f).toInt()
+                  rendreDeplacable(entete, pe, lp, null)
+                  try {
+                      wm.addView(pe, lp)
+                  } catch (_: Exception) {
+                      return
+                  }
+                  panneauEcran = pe
+                  listeEcran = liste
+              }
+
+              private fun fermerPanneauEcran() {
+                  ecranAuto = false
+                  main.removeCallbacks(tourEcran)
+                  val pe = panneauEcran ?: return
+                  try { wm.removeView(pe) } catch (_: Exception) {}
+                  panneauEcran = null
+                  listeEcran = null
+                  btAutoEcran = null
+              }
+
               override fun onDestroy() {
+                  fermerPanneauEcran()
+                  try { lecteurTexte?.close() } catch (_: Exception) {}
+                  fermerMenu()
+                  fermerBarre()
+                  try { recoVoix?.destroy() } catch (_: Exception) {}
+                  try { ttsRep?.shutdown() } catch (_: Exception) {}
+                  try { traducteurRetour?.close() } catch (_: Exception) {}
                   actif = false
+                  captureOn = false
                   main.removeCallbacksAndMessages(null)
                   try { reco?.destroy() } catch (_: Exception) {}
                   reco = null
+                  try { recoTest?.destroy() } catch (_: Exception) {}
+                  recoTest = null
                   ecriture = null
                   try { lecture?.close() } catch (_: Exception) {}
+                  try { lectureTest?.close() } catch (_: Exception) {}
                   try { filCapture?.join(300) } catch (_: Exception) {}
                   try { enregistreur?.stop() } catch (_: Exception) {}
                   try { enregistreur?.release() } catch (_: Exception) {}
@@ -1134,6 +2332,6 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.${{ github.run_number }}
-          name: Lushi Traducteur v1.${{ github.run_number }}
+          tag_name: v2.${{ github.run_number }}
+          name: Lushi Traducteur v2.${{ github.run_number }}
           files: lushi-traducteur.apk
