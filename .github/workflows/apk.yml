@@ -64,8 +64,8 @@ jobs:
                   applicationId 'com.lushipratique.traducteur'
                   minSdk 29
                   targetSdk 33
-                  versionCode 3
-                  versionName '2.1'
+                  versionCode 6
+                  versionName '3.0'
                   ndk { abiFilters 'arm64-v8a', 'armeabi-v7a' }
               }
               signingConfigs {
@@ -93,6 +93,8 @@ jobs:
           }
           dependencies {
               implementation 'com.google.mlkit:translate:17.0.3'
+              implementation 'net.java.dev.jna:jna:5.13.0@aar'
+              implementation group: 'com.alphacephei', name: 'vosk-android', version: '0.3.47', ext: 'aar'
               implementation 'com.google.android.gms:play-services-mlkit-text-recognition:19.0.1'
               implementation 'com.google.android.gms:play-services-mlkit-text-recognition-korean:16.0.1'
               implementation 'com.google.android.gms:play-services-mlkit-text-recognition-japanese:16.0.1'
@@ -233,6 +235,16 @@ jobs:
           import java.io.ByteArrayOutputStream
           import java.util.Locale
           import java.util.concurrent.atomic.AtomicInteger
+          import org.json.JSONObject
+          import org.vosk.Model
+          import org.vosk.Recognizer
+          import java.io.File
+          import java.io.FileInputStream
+          import java.io.FileOutputStream
+          import java.io.IOException
+          import java.net.HttpURLConnection
+          import java.net.URL
+          import java.util.zip.ZipInputStream
           import kotlin.math.abs
           import kotlin.math.min
 
@@ -242,28 +254,28 @@ jobs:
           //  tout en francais, en direct.
           // =====================================================================
 
-          data class Langue(val nom: String, val parole: String, val code: String)
+          data class Langue(val nom: String, val parole: String, val code: String, val autre: String = "", val vosk: String = "")
 
           val AUTO = Langue("Automatique (recommandé)", "", "auto")
 
           val LANGUES = listOf(
-              Langue("Coréen", "ko-KR", "ko"),
-              Langue("Japonais", "ja-JP", "ja"),
-              Langue("Chinois", "zh-CN", "zh"),
-              Langue("Anglais", "en-US", "en"),
-              Langue("Espagnol", "es-ES", "es"),
-              Langue("Portugais", "pt-BR", "pt"),
+              Langue("Coréen", "ko-KR", "ko", vosk = "vosk-model-small-ko-0.22"),
+              Langue("Japonais", "ja-JP", "ja", vosk = "vosk-model-small-ja-0.22"),
+              Langue("Chinois", "zh-CN", "zh", "cmn-Hans-CN", vosk = "vosk-model-small-cn-0.22"),
+              Langue("Anglais", "en-US", "en", vosk = "vosk-model-small-en-us-0.15"),
+              Langue("Espagnol", "es-ES", "es", vosk = "vosk-model-small-es-0.42"),
+              Langue("Portugais", "pt-BR", "pt", vosk = "vosk-model-small-pt-0.3"),
               Langue("Arabe", "ar-SA", "ar"),
-              Langue("Russe", "ru-RU", "ru"),
-              Langue("Hindi", "hi-IN", "hi"),
+              Langue("Russe", "ru-RU", "ru", vosk = "vosk-model-small-ru-0.22"),
+              Langue("Hindi", "hi-IN", "hi", vosk = "vosk-model-small-hi-0.22"),
               Langue("Indonésien", "id-ID", "id"),
-              Langue("Vietnamien", "vi-VN", "vi"),
+              Langue("Vietnamien", "vi-VN", "vi", vosk = "vosk-model-small-vn-0.4"),
               Langue("Thaï", "th-TH", "th"),
-              Langue("Turc", "tr-TR", "tr"),
-              Langue("Allemand", "de-DE", "de"),
-              Langue("Italien", "it-IT", "it"),
+              Langue("Turc", "tr-TR", "tr", vosk = "vosk-model-small-tr-0.3"),
+              Langue("Allemand", "de-DE", "de", vosk = "vosk-model-small-de-0.15"),
+              Langue("Italien", "it-IT", "it", vosk = "vosk-model-small-it-0.22"),
               Langue("Swahili", "sw-TZ", "sw"),
-              Langue("Français", "fr-FR", "fr")
+              Langue("Français", "fr-FR", "fr", vosk = "vosk-model-small-fr-0.22")
           )
 
           val CHOIX = listOf(AUTO) + LANGUES
@@ -412,6 +424,33 @@ jobs:
                   lpStop.topMargin = dp(10f)
                   racine.addView(btStop, lpStop)
 
+                  // ---------- Menu de commandes (le même que dans la bulle) ----------
+                  racine.addView(etiquette("Commandes de la bulle"))
+                  fun commande(t: String, couleur: Int, action: String): Button {
+                      val b = Button(this)
+                      b.text = t
+                      b.isAllCaps = false
+                      b.textSize = 15f
+                      b.setTextColor(Color.WHITE)
+                      b.background = fond(couleur, dp(14f).toFloat())
+                      b.setOnClickListener { envoyer(action) }
+                      return b
+                  }
+                  fun ligne(a: Button, b: Button) {
+                      val l = LinearLayout(this)
+                      l.orientation = LinearLayout.HORIZONTAL
+                      val p1 = LinearLayout.LayoutParams(0, dp(54f), 1f)
+                      p1.rightMargin = dp(8f)
+                      l.addView(a, p1)
+                      l.addView(b, LinearLayout.LayoutParams(0, dp(54f), 1f))
+                      val lpL = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                      lpL.topMargin = dp(8f)
+                      racine.addView(l, lpL)
+                  }
+                  ligne(commande("📖 Sous-titres", 0xFF00897B.toInt(), "PANNEAU"), commande("✍️ Écrire / 🎤 Parler", 0xFF534AB7.toInt(), "BARRE"))
+                  ligne(commande("📷 Lire l'écran", 0xFFEF6C00.toInt(), "ECRAN"), commande("🔍 Chercher la langue", 0xFF3949AB.toInt(), "DETECTER"))
+                  ligne(commande("🔊 Voix oui / non", 0xFF6A1B9A.toInt(), "VOIX"), commande("💬 Menu de la bulle", 0xFF283593.toInt(), "MENU"))
+
                   tvEtat = TextView(this)
                   tvEtat.textSize = 14f
                   tvEtat.setTextColor(0xFF1B5E20.toInt())
@@ -439,6 +478,21 @@ jobs:
 
               private fun etat(m: String) {
                   tvEtat.text = m
+              }
+
+              // Envoie une commande à la bulle déjà lancée, puis laisse la place au live.
+              private fun envoyer(action: String) {
+                  if (!BulleService.enMarche) {
+                      etat("Lance d'abord la bulle avec LANCER LA BULLE.")
+                      return
+                  }
+                  try {
+                      startService(Intent(this, BulleService::class.java).setAction(action))
+                      etat("✅ Commande envoyée à la bulle.")
+                      moveTaskToBack(true)
+                  } catch (e: Exception) {
+                      etat("La bulle ne répond pas. Relance-la.")
+                  }
               }
 
               private fun lancer() {
@@ -537,6 +591,10 @@ jobs:
           // =====================================================================
           class BulleService : Service() {
 
+              companion object {
+                  @Volatile var enMarche = false
+              }
+
               private data class Strat(val surAppareil: Boolean, val parSource: Boolean, val segmente: Boolean)
 
               private val main = Handler(Looper.getMainLooper())
@@ -566,6 +624,10 @@ jobs:
               private var auto = true
               private var langue: Langue? = null
               private var idxTest = 0
+              private var phase = 1
+              private var candidatsTest: List<Langue> = LANGUES
+              private val tagEfficace = HashMap<String, String>()
+              private fun tag(l: Langue): String = tagEfficace[l.code] ?: l.parole
               private val scores = HashMap<String, Float>()
               private var recoTest: SpeechRecognizer? = null
               private var lectureTest: ParcelFileDescriptor? = null
@@ -639,8 +701,37 @@ jobs:
                       stopSelf()
                       return START_NOT_STICKY
                   }
+                  val action = intent?.action
+                  if (action != null && action != "STOP") {
+                      if (!demarre || !actif) {
+                          stopSelf()
+                          return START_NOT_STICKY
+                      }
+                      when (action) {
+                          "PANNEAU" -> {
+                              val p = panneau
+                              if (p != null && p.visibility != View.VISIBLE) basculerPanneau()
+                              else if (p != null) basculerPanneau()
+                          }
+                          "BARRE" -> if (barre == null) ouvrirBarre()
+                          "ECRAN" -> {
+                              ouvrirPanneauEcran()
+                              lireEcran()
+                          }
+                          "DETECTER" -> lancerDetection()
+                          "VOIX" -> {
+                              voix = !voix
+                              if (voix && tts == null) preparerVoix()
+                              if (!voix) try { tts?.stop() } catch (_: Exception) {}
+                              Toast.makeText(this, if (voix) "Voix : oui" else "Voix : non", Toast.LENGTH_SHORT).show()
+                          }
+                          "MENU" -> if (menu == null) basculerMenu()
+                      }
+                      return START_NOT_STICKY
+                  }
                   if (demarre || intent == null) return START_NOT_STICKY
                   demarre = true
+                  enMarche = true
 
                   val choix = CHOIX[intent.getIntExtra("src", 0).coerceIn(0, CHOIX.size - 1)]
                   auto = choix.code == "auto"
@@ -700,8 +791,9 @@ jobs:
                   if (auto && detectionPossible) {
                       lancerDetection()
                   } else if (auto) {
-                      info("Détection automatique impossible sur ce téléphone : choisis la langue dans l'application.")
-                      choisir(LANGUES[3])
+                      info("Détection automatique impossible sur ce téléphone : choisis la langue du live dans le menu.")
+                      tvTrad?.text = "👉 Touche la bulle et choisis la langue du live."
+                      basculerMenu()
                   } else {
                       choisir(choix)
                   }
@@ -866,6 +958,27 @@ jobs:
                           buf[2 * i] = (v and 0xFF).toByte()
                           buf[2 * i + 1] = ((v shr 8) and 0xFF).toByte()
                       }
+                      // Moteur continu Vosk : reçoit le son sans jamais s'arrêter.
+                      if (voskRec != null) {
+                          synchronized(verrouVosk) {
+                              val rv = voskRec
+                              if (rv != null) {
+                                  try {
+                                      if (rv.acceptWaveForm(buf, n)) {
+                                          val t = texteVosk(rv.result, "text")
+                                          dernierPartielVosk = ""
+                                          if (t.isNotEmpty()) main.post { recuVosk(t) }
+                                      } else {
+                                          val t = texteVosk(rv.partialResult, "partial")
+                                          if (t.isNotEmpty() && t != dernierPartielVosk) {
+                                              dernierPartielVosk = t
+                                              main.post { partielVosk(t) }
+                                          }
+                                      }
+                                  } catch (_: Exception) {}
+                              }
+                          }
+                      }
                       if (collecte && voixPresente) {
                           clipBuf.write(buf, 0, n)
                           voixMs += n * 1000 / (TAUX * 2)
@@ -911,11 +1024,14 @@ jobs:
                       return
                   }
                   arreterEcoute()
+                  arreterVosk()
                   auto = true
                   if (langue != null) precedente = langue
                   langue = null
                   scores.clear()
                   idxTest = 0
+                  phase = 1
+                  candidatsTest = LANGUES
                   erreursSourceTest = 0
                   clipBuf.reset()
                   voixMs = 0
@@ -949,6 +1065,44 @@ jobs:
                   testerSuivant()
               }
 
+              // Compte un caractère chinois, japonais ou coréen comme plusieurs lettres :
+              // ces écritures disent beaucoup avec peu de signes.
+              private fun longueurPonderee(t: String): Int {
+                  var n = 0
+                  for (c in t) {
+                      val sc = try { Character.UnicodeScript.of(c.code) } catch (_: Exception) { null }
+                      n += when (sc) {
+                          Character.UnicodeScript.HAN, Character.UnicodeScript.HIRAGANA,
+                          Character.UnicodeScript.KATAKANA, Character.UnicodeScript.HANGUL -> 3
+                          else -> if (c.isLetter()) 1 else 0
+                      }
+                  }
+                  return n
+              }
+
+              // Part du texte écrite dans l'écriture attendue pour la langue testée.
+              private fun partEcriture(t: String, code: String): Float {
+                  var lettres = 0
+                  var bonnes = 0
+                  for (c in t) {
+                      if (!c.isLetter()) continue
+                      lettres++
+                      val sc = try { Character.UnicodeScript.of(c.code) } catch (_: Exception) { null }
+                      val ok = when (code) {
+                          "zh" -> sc == Character.UnicodeScript.HAN
+                          "ja" -> sc == Character.UnicodeScript.HIRAGANA || sc == Character.UnicodeScript.KATAKANA || sc == Character.UnicodeScript.HAN
+                          "ko" -> sc == Character.UnicodeScript.HANGUL || sc == Character.UnicodeScript.HAN
+                          "ar" -> sc == Character.UnicodeScript.ARABIC
+                          "ru" -> sc == Character.UnicodeScript.CYRILLIC
+                          "hi" -> sc == Character.UnicodeScript.DEVANAGARI
+                          "th" -> sc == Character.UnicodeScript.THAI
+                          else -> sc == Character.UnicodeScript.LATIN
+                      }
+                      if (ok) bonnes++
+                  }
+                  return if (lettres == 0) 0f else bonnes.toFloat() / lettres
+              }
+
               private fun intentBase(parole: String, partiels: Boolean): Intent {
                   val it = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
                   it.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
@@ -973,12 +1127,13 @@ jobs:
 
               private fun testerSuivant() {
                   if (!actif || langue != null) return
-                  if (idxTest >= LANGUES.size) {
+                  if (idxTest >= candidatsTest.size) {
                       choisirGagnant()
                       return
                   }
-                  val l = LANGUES[idxTest]
-                  tvTrad?.text = "🔍 Recherche de la langue... (${idxTest + 1}/${LANGUES.size})"
+                  val l = candidatsTest[idxTest]
+                  tvTrad?.text = if (phase == 1) "🔍 Recherche de la langue... (${idxTest + 1}/${candidatsTest.size})"
+                  else "🔍 Vérification entre ${candidatsTest.joinToString(", ") { it.nom }}..."
                   tvOrig?.text = "Essai : ${l.nom}"
                   try {
                       if (recoTest == null) {
@@ -988,7 +1143,7 @@ jobs:
                       val p = ParcelFileDescriptor.createPipe()
                       try { lectureTest?.close() } catch (_: Exception) {}
                       lectureTest = p[0]
-                      val it = intentBase(l.parole, false)
+                      val it = intentBase(tag(l), false)
                       mettreSource(it, p[0], false)
                       testEnCours = true
                       recoTest?.startListening(it)
@@ -1021,15 +1176,28 @@ jobs:
                   override fun onResults(results: Bundle?) {
                       val t = texte(results)
                       val conf = results?.getFloatArray(SpeechRecognizer.CONFIDENCE_SCORES)?.firstOrNull() ?: -1f
-                      val s = when {
+                      val l = candidatsTest.getOrNull(idxTest)
+                      var s = when {
                           t == null -> 0f
                           conf > 0f -> conf
-                          else -> 0.3f + min(t.length, 60) / 300f
+                          else -> 0.25f + min(longueurPonderee(t), 60) / 240f
                       }
+                      if (t != null && l != null && partEcriture(t, l.code) < 0.6f) s *= 0.3f
                       finTest(s, false)
                   }
 
                   override fun onError(error: Int) {
+                      // Code de langue refusé (ex. chinois) : on réessaie avec l'autre code.
+                      val l = candidatsTest.getOrNull(idxTest)
+                      if ((error == 12 || error == 13) && l != null && l.autre.isNotEmpty() && tagEfficace[l.code] != l.autre && testEnCours) {
+                          tagEfficace[l.code] = l.autre
+                          testEnCours = false
+                          main.removeCallbacks(timeoutTest)
+                          try { lectureTest?.close() } catch (_: Exception) {}
+                          lectureTest = null
+                          main.postDelayed({ testerSuivant() }, 30)
+                          return
+                      }
                       finTest(0f, error == 3 || error == 5 || error == 11)
                   }
               }
@@ -1040,18 +1208,20 @@ jobs:
                   main.removeCallbacks(timeoutTest)
                   try { lectureTest?.close() } catch (_: Exception) {}
                   lectureTest = null
-                  if (!actif || langue != null || idxTest >= LANGUES.size) return
+                  if (!actif || langue != null || idxTest >= candidatsTest.size) return
                   if (erreurSource) erreursSourceTest++
-                  val l = LANGUES[idxTest]
-                  scores[l.code] = score
+                  val l = candidatsTest[idxTest]
+                  scores[l.code] = (scores[l.code] ?: 0f) + score
                   if (erreursSourceTest >= 3 && scores.values.all { it <= 0f }) {
                       detectionPossible = false
-                      info("Ce téléphone ne permet pas la détection automatique. Choisis la langue dans l'application.")
-                      choisir(LANGUES[3])
+                      info("Détection automatique impossible sur ce téléphone : choisis la langue du live dans le menu.")
+                      tvTrad?.text = "👉 Touche la bulle et choisis la langue du live."
+                      couleurBulle(ORANGE)
+                      if (menu == null) basculerMenu()
                       return
                   }
                   idxTest++
-                  if (score >= 0.85f) {
+                  if (score >= 0.9f) {
                       choisir(l)
                       return
                   }
@@ -1059,7 +1229,22 @@ jobs:
               }
 
               private fun choisirGagnant() {
-                  val meilleur = scores.maxByOrNull { it.value }
+                  val classement = scores.entries.sortedByDescending { it.value }
+                  val meilleur = classement.firstOrNull()
+                  // Pas assez sûr ? Deuxième écoute, seulement entre les 3 meilleures langues.
+                  if (phase == 1 && meilleur != null && meilleur.value >= 0.2f && classement.size >= 2 &&
+                      meilleur.value - classement[1].value < 0.25f) {
+                      phase = 2
+                      candidatsTest = classement.take(3).mapNotNull { e -> LANGUES.firstOrNull { it.code == e.key } }
+                      idxTest = 0
+                      clipBuf.reset()
+                      voixMs = 0
+                      collecte = true
+                      tvTrad?.text = "🔍 J'hésite entre ${candidatsTest.joinToString(", ") { it.nom }} : j'écoute encore un peu..."
+                      main.removeCallbacks(timeoutCollecte)
+                      main.postDelayed(timeoutCollecte, 20000)
+                      return
+                  }
                   if (meilleur == null || meilleur.value < 0.2f) {
                       tvOrig?.text = "Langue pas encore reconnue, je réessaie..."
                       main.postDelayed({ lancerDetection() }, 800)
@@ -1087,7 +1272,7 @@ jobs:
                   majBoutonTraduire()
                   tvOrig?.text = if (auto) "✅ Langue détectée : ${l.nom}" else "Langue : ${l.nom}"
                   preparerTraducteur(l)
-                  demarrerEcoute()
+                  if (l.vosk.isNotEmpty() && captureOn) demarrerVosk(l) else demarrerEcoute()
               }
 
               private fun preparerTraducteur(l: Langue) {
@@ -1161,7 +1346,7 @@ jobs:
                           reco?.setRecognitionListener(ecouteur)
                           recoStrat = st
                       }
-                      val it = intentBase(l.parole, true)
+                      val it = intentBase(tag(l), true)
                       val ancienne = lecture
                       if (st.parSource && Build.VERSION.SDK_INT >= 33 && captureOn) {
                           val p = ParcelFileDescriptor.createPipe()
@@ -1263,6 +1448,12 @@ jobs:
                           return
                       }
                   }
+                  val lc = langue
+                  if ((code == 12 || code == 13) && lc != null && lc.autre.isNotEmpty() && tagEfficace[lc.code] != lc.autre) {
+                      tagEfficace[lc.code] = lc.autre
+                      relancer(100)
+                      return
+                  }
                   erreursSuite++
                   val grave = code == 3 || code == 5 || code == 11 || code == 12 || code == 13 || code == 14
                   if (!resultatsDansStrategie && strategie < strats.size - 1 && (grave || erreursSuite >= 3)) {
@@ -1305,7 +1496,7 @@ jobs:
               // À chaque pause de la personne (plus d'une seconde sans nouveaux mots),
               // la phrase en cours est posée comme une ligne : on suit son rythme.
               private fun poserPause() {
-                  if (!actif || !ecouteActive || partielTrad.isEmpty()) return
+                  if (!actif || !traductionActive() || partielTrad.isEmpty()) return
                   lignes.addLast(partielTrad)
                   while (lignes.size > 3) lignes.removeFirst()
                   partielTrad = ""
@@ -1329,7 +1520,7 @@ jobs:
                   dernierPartiel = now
                   val seq = ++seqPartiel
                   traduire(t) { r ->
-                      if (seq == seqPartiel && actif && ecouteActive) {
+                      if (seq == seqPartiel && actif && traductionActive()) {
                           partielTrad = r
                           rafraichir()
                       }
@@ -1340,7 +1531,7 @@ jobs:
                   tvOrig?.text = t
                   val seq = ++seqPartiel
                   traduire(t) { r ->
-                      if (!actif || !ecouteActive) return@traduire
+                      if (!actif || !traductionActive()) return@traduire
                       if (seq == seqPartiel) partielTrad = ""
                       main.removeCallbacks(validerPause)
                       if (ligneDePause && lignes.isNotEmpty()) lignes.removeLast()
@@ -1807,7 +1998,7 @@ jobs:
                   etiquette.textSize = 12f
                   etiquette.setPadding(0, dp(12f), 0, dp(4f))
                   m.addView(etiquette)
-                  val noms = listOf("🔍 Automatique") + LANGUES.map { it.nom }
+                  val noms = listOf("🔍 Automatique") + LANGUES.map { if (it.vosk.isNotEmpty()) it.nom + " 🎧" else it.nom }
                   val actuel = if (auto) 0 else LANGUES.indexOfFirst { it == langue } + 1
                   m.addView(rangeeChips(noms, actuel.coerceAtLeast(0)) { i ->
                       fermerMenu()
@@ -2275,7 +2466,161 @@ jobs:
                   btAutoEcran = null
               }
 
+              // ======================== MOTEUR CONTINU VOSK ========================
+              // Reconnaissance vocale libre et gratuite, sans coupure, qui marche sans Internet
+              // une fois la langue téléchargée (une seule fois).
+              private val verrouVosk = Any()
+              @Volatile private var voskRec: Recognizer? = null
+              private var voskModele: Model? = null
+              @Volatile private var voskCode = ""
+              @Volatile private var dernierPartielVosk = ""
+
+              private fun traductionActive(): Boolean = ecouteActive || voskRec != null
+
+              private fun texteVosk(json: String, cle: String): String {
+                  val t = try { JSONObject(json).optString(cle, "").trim() } catch (_: Exception) { "" }
+                  // Vosk sépare les caractères chinois et japonais par des espaces : on les recolle.
+                  return if (voskCode == "zh" || voskCode == "ja") t.replace(" ", "") else t
+              }
+
+              private fun recuVosk(t: String) {
+                  if (!actif || voskRec == null) return
+                  derniereReussite = SystemClock.elapsedRealtime()
+                  couleurBulle(VERT)
+                  finale(t)
+              }
+
+              private fun partielVosk(t: String) {
+                  if (!actif || voskRec == null) return
+                  partiel(t)
+              }
+
+              private fun dossierVosk(l: Langue) = File(File(filesDir, "vosk"), l.vosk)
+
+              private fun modeleInstalle(d: File) = File(d, "am").isDirectory || File(d, "conf").isDirectory
+
+              private fun demarrerVosk(l: Langue) {
+                  arreterEcoute()
+                  arreterVosk()
+                  val d = dossierVosk(l)
+                  if (modeleInstalle(d)) chargerVosk(l, d) else telechargerVosk(l, d)
+              }
+
+              private fun telechargerVosk(l: Langue, dossier: File) {
+                  couleurBulle(ORANGE)
+                  tvTrad?.text = "Téléchargement du moteur ${l.nom} (une seule fois, gratuit)..."
+                  Thread {
+                      var ok = false
+                      try {
+                          val racine = File(filesDir, "vosk")
+                          racine.mkdirs()
+                          val zip = File(racine, l.vosk + ".zip")
+                          val c = URL("https://alphacephei.com/vosk/models/${l.vosk}.zip").openConnection() as HttpURLConnection
+                          c.connectTimeout = 20000
+                          c.readTimeout = 30000
+                          c.instanceFollowRedirects = true
+                          val total = c.contentLengthLong
+                          c.inputStream.use { entree ->
+                              FileOutputStream(zip).use { sortie ->
+                                  val b = ByteArray(64 * 1024)
+                                  var lu = 0L
+                                  var dernier = -1
+                                  while (true) {
+                                      val n = entree.read(b)
+                                      if (n < 0) break
+                                      sortie.write(b, 0, n)
+                                      lu += n
+                                      if (!actif) throw IOException("arrêt")
+                                      if (total > 0) {
+                                          val pc = (lu * 100 / total).toInt()
+                                          if (pc != dernier) {
+                                              dernier = pc
+                                              val mo = lu / 1048576
+                                              val tot = total / 1048576
+                                              main.post { if (langue == l) tvTrad?.text = "Téléchargement du moteur ${l.nom} : $pc % ($mo / $tot Mo)" }
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                          main.post { if (langue == l) tvTrad?.text = "Installation du moteur ${l.nom}..." }
+                          val base = racine.canonicalPath + File.separator
+                          ZipInputStream(FileInputStream(zip)).use { zin ->
+                              while (true) {
+                                  val e = zin.nextEntry ?: break
+                                  val f = File(racine, e.name)
+                                  if (!f.canonicalPath.startsWith(base)) continue
+                                  if (e.isDirectory) {
+                                      f.mkdirs()
+                                  } else {
+                                      f.parentFile?.mkdirs()
+                                      FileOutputStream(f).use { zin.copyTo(it) }
+                                  }
+                              }
+                          }
+                          zip.delete()
+                          ok = modeleInstalle(dossier)
+                      } catch (e: Exception) {
+                          ok = false
+                      }
+                      main.post {
+                          if (!actif || langue != l) return@post
+                          if (ok) {
+                              chargerVosk(l, dossier)
+                          } else {
+                              tvOrig?.text = "Téléchargement du moteur impossible. Vérifie Internet. J'utilise le moteur Google en attendant."
+                              demarrerEcoute()
+                          }
+                      }
+                  }.start()
+              }
+
+              private fun chargerVosk(l: Langue, dossier: File) {
+                  tvTrad?.text = "Démarrage du moteur continu ${l.nom}..."
+                  Thread {
+                      val paire: Pair<Model, Recognizer>? = try {
+                          val m = Model(dossier.absolutePath)
+                          Pair(m, Recognizer(m, TAUX.toFloat()))
+                      } catch (e: Throwable) {
+                          null
+                      }
+                      main.post {
+                          if (paire == null || !actif || langue != l) {
+                              try { paire?.second?.close() } catch (_: Exception) {}
+                              try { paire?.first?.close() } catch (_: Exception) {}
+                              if (paire == null && actif && langue == l) {
+                                  tvOrig?.text = "Moteur continu indisponible : j'utilise le moteur Google."
+                                  demarrerEcoute()
+                              }
+                              return@post
+                          }
+                          synchronized(verrouVosk) {
+                              voskModele = paire.first
+                              voskRec = paire.second
+                              voskCode = l.code
+                          }
+                          derniereReussite = SystemClock.elapsedRealtime()
+                          couleurBulle(VERT)
+                          if (lignes.isEmpty()) tvTrad?.text = "🎧 Moteur continu prêt : ${l.nom} > français."
+                      }
+                  }.start()
+              }
+
+              private fun arreterVosk() {
+                  synchronized(verrouVosk) {
+                      try { voskRec?.close() } catch (_: Exception) {}
+                      try { voskModele?.close() } catch (_: Exception) {}
+                      voskRec = null
+                      voskModele = null
+                  }
+                  dernierPartielVosk = ""
+              }
+
               override fun onDestroy() {
+                  captureOn = false
+                  try { filCapture?.join(300) } catch (_: Exception) {}
+                  arreterVosk()
+                  enMarche = false
                   fermerPanneauEcran()
                   try { lecteurTexte?.close() } catch (_: Exception) {}
                   fermerMenu()
@@ -2332,6 +2677,6 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.${{ github.run_number }}
-          name: Lushi Traducteur v2.${{ github.run_number }}
+          tag_name: v3.${{ github.run_number }}
+          name: Lushi Traducteur v3.${{ github.run_number }}
           files: lushi-traducteur.apk
