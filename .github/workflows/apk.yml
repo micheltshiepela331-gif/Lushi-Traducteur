@@ -64,8 +64,8 @@ jobs:
                   applicationId 'com.lushipratique.traducteur'
                   minSdk 29
                   targetSdk 33
-                  versionCode 11
-                  versionName '5.2'
+                  versionCode 17
+                  versionName '5.8'
                   ndk { abiFilters 'arm64-v8a', 'armeabi-v7a' }
               }
               signingConfigs {
@@ -192,6 +192,7 @@ jobs:
           import android.view.Gravity
           import android.view.MotionEvent
           import android.view.View
+          import android.view.ViewGroup
           import android.view.WindowManager
           import android.view.inputmethod.InputMethodManager
           import android.widget.ArrayAdapter
@@ -512,6 +513,7 @@ jobs:
               private var lpPanneau: WindowManager.LayoutParams? = null
               private var tvTitre: TextView? = null
               private var tvTrad: TextView? = null
+              private var svTrad: ScrollView? = null
               private var tvOrig: TextView? = null
 
               private var projection: MediaProjection? = null
@@ -547,8 +549,10 @@ jobs:
               private var partielTrad = ""
               private var seqPartiel = 0
               private var dernierPartiel = 0L
-              private var ligneDePause = false
               private var taille = 19f
+              private var debutVoix = 0L
+              // Moment où la dernière session d'écoute s'est terminée (pour ne rien perdre).
+              @Volatile private var finSession = 0L
               private var demarre = false
 
               private val runSession = Runnable { nouvelleSession() }
@@ -616,8 +620,10 @@ jobs:
                       captureOk = projection != null && demarrerCapture(true)
                   }
                   if (!captureOk) {
+                      // Comme la toute première version : sans son interne,
+                      // la reconnaissance écoute elle-même par le micro.
                       interne = false
-                      captureOk = demarrerCapture(false)
+                      info("Son interne indisponible : j'écoute par le micro (monte le volume).")
                   }
 
                   strats.clear()
@@ -675,7 +681,7 @@ jobs:
                                   .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                                   .build()
                           )
-                          t.setSpeechRate(1.15f)
+                          t.setSpeechRate(1.35f)
                           ttsPret = true
                       }
                   }
@@ -684,7 +690,12 @@ jobs:
               private fun parler(t: String) {
                   val v = tts ?: return
                   if (!voix || !ttsPret || t.isBlank()) return
-                  v.speak(t, TextToSpeech.QUEUE_ADD, null, "t" + SystemClock.elapsedRealtime())
+                  // La voix ne doit jamais prendre du retard sur la personne qui parle :
+                  // si elle est encore en train de lire, on saute à la phrase la plus récente.
+                  val mode = if (v.isSpeaking && SystemClock.elapsedRealtime() - debutVoix > 2500)
+                      TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
+                  if (mode == TextToSpeech.QUEUE_FLUSH || !v.isSpeaking) debutVoix = SystemClock.elapsedRealtime()
+                  v.speak(t, mode, null, "t" + SystemClock.elapsedRealtime())
               }
 
               // ============================ CAPTURE ============================
@@ -720,6 +731,7 @@ jobs:
                       enregistreur = rec
                       captureMicro = !sonInterne
                       captureOn = true
+                      // Priorité normale : la vidéo garde la priorité sur le téléphone.
                       val th = Thread({
                           try { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DEFAULT) } catch (_: Exception) {}
                           boucleCapture(rec)
@@ -740,47 +752,51 @@ jobs:
                   enregistreur = null
               }
 
-              // Lit le son par morceaux de 100 ms : filtre de la voix, amplificateur,
-              // puis envoi à la reconnaissance sans jamais bloquer.
+              // Méthode de la toute première version : le son du téléphone est
+              // envoyé tel quel (sans filtre ni amplificateur) à la reconnaissance.
               private fun boucleCapture(rec: AudioRecord) {
                   val buf = ByteArray(TAUX / 5)
-                  val ech = FloatArray(buf.size / 2)
                   var courant: ParcelFileDescriptor? = null
                   var casse = false
                   val pfd = StructPollfd()
                   val tab = arrayOf(pfd)
-                  var gain = 1f
-                  val haut1 = Filtre.passeHaut(150f, TAUX.toFloat())
-                  val haut2 = Filtre.passeHaut(150f, TAUX.toFloat())
-                  val bas1 = Filtre.passeBas(3600f, TAUX.toFloat())
-                  val bas2 = Filtre.passeBas(3600f, TAUX.toFloat())
+                  // Mémoire des 3 dernières secondes de son : pendant que le moteur
+                  // redémarre, la voix est gardée puis rejouée, aucun mot n'est perdu.
+                  val memoire = ArrayDeque<Pair<Long, ByteArray>>()
                   while (actif && captureOn) {
                       val n = rec.read(buf, 0, buf.size)
                       if (n <= 0) {
                           if (n < 0) SystemClock.sleep(20)
                           continue
                       }
-                      val nb = n / 2
+                      memoire.addLast(Pair(SystemClock.elapsedRealtime(), buf.copyOf(n)))
+                      while (memoire.size > 30) memoire.removeFirst()
                       var crete = 0
-                      for (i in 0 until nb) {
-                          val s = ((buf[2 * i + 1].toInt() shl 8) or (buf[2 * i].toInt() and 0xFF)).toShort().toInt()
-                          ech[i] = bas2.f(bas1.f(haut2.f(haut1.f(s.toFloat()))))
-                          val a = abs(ech[i].toInt())
-                          if (a > crete) crete = a
+                      var i = 0
+                      while (i + 1 < n) {
+                          val v = abs(((buf[i + 1].toInt() shl 8) or (buf[i].toInt() and 0xFF)).toShort().toInt())
+                          if (v > crete) crete = v
+                          i += 2
                       }
                       if (crete > 500) derniereVoix = SystemClock.elapsedRealtime()
-                      val voulu = if (crete > 150) (14000f / crete).coerceIn(1f, 8f) else gain
-                      gain = if (voulu < gain) voulu else gain + (voulu - gain) * 0.15f
-                      for (i in 0 until nb) {
-                          val v = (ech[i] * gain).toInt().coerceIn(-32768, 32767)
-                          buf[2 * i] = (v and 0xFF).toByte()
-                          buf[2 * i + 1] = ((v shr 8) and 0xFF).toByte()
-                      }
                       val voulue = ecriture
                       if (voulue !== courant) {
                           try { courant?.close() } catch (_: Exception) {}
                           courant = voulue
                           casse = false
+                          // Nouvelle session : on rejoue d'abord le son du « trou » entre
+                          // les deux sessions (sans le morceau qu'on vient de lire).
+                          val nw = voulue
+                          if (nw != null) {
+                              val depuis = finSession - 250
+                              try {
+                                  // 1,5 s au maximum : le tuyau ne se bloque jamais.
+                                  for (i in maxOf(0, memoire.size - 16) until memoire.size - 1) {
+                                      val (ts, morceau) = memoire.elementAt(i)
+                                      if (ts >= depuis) Os.write(nw.fileDescriptor, morceau, 0, morceau.size)
+                                  }
+                              } catch (_: Exception) {}
+                          }
                       }
                       val w = courant
                       if (w == null || casse) continue
@@ -842,8 +858,6 @@ jobs:
                   it.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
                   it.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
                   it.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
-                  it.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 800L)
-                  it.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 600L)
                   return it
               }
 
@@ -925,6 +939,7 @@ jobs:
 
                   override fun onResults(results: Bundle?) {
                       enCours = false
+                      finSession = SystemClock.elapsedRealtime()
                       recu(results)
                       relancer(20)
                   }
@@ -936,11 +951,13 @@ jobs:
 
                   override fun onEndOfSegmentedSession() {
                       enCours = false
+                      finSession = SystemClock.elapsedRealtime()
                       relancer(20)
                   }
 
                   override fun onError(error: Int) {
                       enCours = false
+                      finSession = SystemClock.elapsedRealtime()
                       gererErreur(error)
                   }
               }
@@ -1018,30 +1035,66 @@ jobs:
               }
 
               // ============================ AFFICHAGE ============================
-              // À chaque pause de la personne, la phrase en cours devient une ligne.
-              private fun poserPause() {
-                  if (!actif || partielTrad.isEmpty()) return
-                  lignes.addLast(partielTrad)
-                  while (lignes.size > 3) lignes.removeFirst()
-                  partielTrad = ""
-                  ligneDePause = true
+              // Le moteur renvoie une phrase qui grandit sans fin pendant le live.
+              // On la découpe en lignes fixes : à chaque pause, quand elle devient
+              // trop longue, ou toutes les 5 secondes. Les lignes déjà posées ne
+              // bougent plus ; seule la fin en cours de phrase bouge.
+              private var dejaPose = 0
+              private var debutMorceau = 0L
+              private var dernierSource = ""
+
+              private fun ajouterLigne(r: String) {
+                  if (r.isBlank() || lignes.lastOrNull() == r) return
+                  lignes.addLast(r)
+                  while (lignes.size > 30) lignes.removeFirst()
                   rafraichir()
                   glisser()
+                  parler(r)
+              }
+
+              private fun resteDe(t: String): String {
+                  if (t.length + 10 < dejaPose) dejaPose = 0 // nouvelle phrase du moteur
+                  return t.substring(minOf(dejaPose, t.length)).trim()
+              }
+
+              private fun figer(morceau: String, fin: Int) {
+                  dejaPose = fin
+                  debutMorceau = SystemClock.elapsedRealtime()
+                  val seq = ++seqPartiel
+                  partielTrad = ""
+                  rafraichir()
+                  traduire(morceau) { r ->
+                      if (!actif) return@traduire
+                      if (seq == seqPartiel) partielTrad = ""
+                      ajouterLigne(r)
+                  }
+              }
+
+              // Pause de la personne : la fin de phrase en cours devient une ligne fixe.
+              private fun poserPause() {
+                  if (!actif) return
+                  val m = resteDe(dernierSource)
+                  if (m.isNotEmpty()) figer(m, dernierSource.length)
               }
 
               private fun partiel(t: String) {
                   tvOrig?.text = t
+                  dernierSource = t
                   main.removeCallbacks(validerPause)
-                  main.postDelayed(validerPause, 1300)
-                  if (ligneDePause && lignes.isNotEmpty()) {
-                      lignes.removeLast()
-                      ligneDePause = false
-                  }
+                  main.postDelayed(validerPause, 700)
                   val now = SystemClock.elapsedRealtime()
-                  if (now - dernierPartiel < 450) return
+                  val m = resteDe(t)
+                  if (m.isEmpty()) return
+                  if (debutMorceau == 0L) debutMorceau = now
+                  // Phrase trop longue ou qui dure trop : on coupe et on pose une ligne.
+                  if (m.length > 55 || now - debutMorceau > 3000) {
+                      figer(m, t.length)
+                      return
+                  }
+                  if (now - dernierPartiel < 350) return
                   dernierPartiel = now
                   val seq = ++seqPartiel
-                  traduire(t) { r ->
+                  traduire(m) { r ->
                       if (seq == seqPartiel && actif) {
                           partielTrad = r
                           rafraichir()
@@ -1051,19 +1104,21 @@ jobs:
 
               private fun finale(t: String) {
                   tvOrig?.text = t
+                  main.removeCallbacks(validerPause)
+                  val m = resteDe(t)
+                  dejaPose = 0
+                  debutMorceau = 0L
+                  dernierSource = ""
                   val seq = ++seqPartiel
-                  traduire(t) { r ->
+                  partielTrad = ""
+                  if (m.isEmpty()) {
+                      rafraichir()
+                      return
+                  }
+                  traduire(m) { r ->
                       if (!actif) return@traduire
                       if (seq == seqPartiel) partielTrad = ""
-                      main.removeCallbacks(validerPause)
-                      if (ligneDePause && lignes.isNotEmpty()) lignes.removeLast()
-                      ligneDePause = false
-                      if (lignes.lastOrNull() == r) return@traduire
-                      lignes.addLast(r)
-                      while (lignes.size > 3) lignes.removeFirst()
-                      rafraichir()
-                      glisser()
-                      parler(r)
+                      ajouterLigne(r)
                   }
               }
 
@@ -1089,7 +1144,18 @@ jobs:
                       sb.append(partielTrad)
                       sb.setSpan(ForegroundColorSpan(0xFF80FFE8.toInt()), d, sb.length, 0)
                   }
+                  val sv = svTrad
+                  val enBas = sv == null || sv.getChildAt(0) == null ||
+                      sv.scrollY + sv.height >= sv.getChildAt(0).height - dp(48f)
                   tvTrad?.text = sb
+                  // On suit le direct, sauf si l'utilisateur est remonté pour relire.
+                  if (enBas) sv?.post { sv.fullScroll(View.FOCUS_DOWN) }
+              }
+
+              // Hauteur du lecteur : 4 lignes environ, selon la taille du texte.
+              private fun hauteurLecteur(): Int {
+                  val px = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, taille, resources.displayMetrics)
+                  return (px * 1.15f * 1.2f * 4f).toInt() + dp(10f)
               }
 
               private fun couleurBulle(c: Int) {
@@ -1246,7 +1312,6 @@ jobs:
                   trad.setShadowLayer(4f, 0f, 1f, Color.BLACK)
                   trad.setLineSpacing(0f, 1.15f)
                   trad.minLines = 3
-                  trad.maxLines = 5
                   trad.gravity = Gravity.BOTTOM or Gravity.START
                   trad.setPadding(0, dp(8f), 0, 0)
                   trad.text = "J'écoute... lance la vidéo."
@@ -1259,8 +1324,16 @@ jobs:
                   orig.ellipsize = TextUtils.TruncateAt.START
                   orig.setPadding(0, dp(6f), 0, 0)
 
+                  // Lecteur qui défile : les nouvelles lignes arrivent en bas et poussent
+                  // les anciennes vers le haut. On peut remonter avec le doigt pour relire.
+                  val sv = ScrollView(this)
+                  sv.isVerticalScrollBarEnabled = false
+                  sv.isFillViewport = true
+                  sv.addView(trad, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                  svTrad = sv
+
                   pn.addView(entete)
-                  pn.addView(trad)
+                  pn.addView(sv, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, hauteurLecteur()))
                   pn.addView(orig)
 
                   val ecran = resources.displayMetrics
@@ -1291,6 +1364,12 @@ jobs:
               private fun changerTaille(d: Float) {
                   taille = (taille + d).coerceIn(12f, 34f)
                   tvTrad?.textSize = taille
+                  svTrad?.let { sv ->
+                      val lp = sv.layoutParams
+                      lp.height = hauteurLecteur()
+                      sv.layoutParams = lp
+                      sv.post { sv.fullScroll(View.FOCUS_DOWN) }
+                  }
               }
 
               // ======================== REPONDRE ========================
