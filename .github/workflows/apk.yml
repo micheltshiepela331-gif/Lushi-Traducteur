@@ -63,8 +63,8 @@ jobs:
                   applicationId 'com.lushipratique.traducteur'
                   minSdk 29
                   targetSdk 33
-                  versionCode 1
-                  versionName '1.0'
+                  versionCode 20
+                  versionName '1.1'
               }
               signingConfigs {
                   release {
@@ -143,6 +143,8 @@ jobs:
           import android.app.NotificationManager
           import android.app.PendingIntent
           import android.app.Service
+          import android.content.ClipData
+          import android.content.ClipboardManager
           import android.content.Context
           import android.content.Intent
           import android.content.pm.PackageManager
@@ -176,7 +178,9 @@ jobs:
           import android.system.Os
           import android.system.OsConstants
           import android.system.StructPollfd
+          import android.text.Editable
           import android.text.SpannableStringBuilder
+          import android.text.TextWatcher
           import android.text.TextUtils
           import android.text.style.ForegroundColorSpan
           import android.util.TypedValue
@@ -184,6 +188,8 @@ jobs:
           import android.view.MotionEvent
           import android.view.View
           import android.view.WindowManager
+          import android.view.inputmethod.InputMethodManager
+          import android.widget.EditText
           import android.widget.ArrayAdapter
           import android.widget.Button
           import android.widget.LinearLayout
@@ -349,7 +355,8 @@ jobs:
                       "1. Choisis la langue du live et ta langue.\n" +
                       "2. Appuie sur LANCER LA BULLE et accepte les autorisations.\n" +
                       "3. Ouvre YouTube : la bulle 🌐 flotte au-dessus.\n" +
-                      "4. Touche la bulle pour montrer ou cacher les sous-titres. Glisse-la où tu veux.\n\n" +
+                      "4. Touche la bulle pour montrer ou cacher les sous-titres. Glisse-la où tu veux.\n" +
+                      "5. Pour répondre dans le chat : touche ✍, écris (ou appuie sur 🎤) dans ta langue. La traduction est copiée toute seule : colle-la dans le chat.\n\n" +
                       "Couleur de la bulle : vert = j'écoute, orange = je cherche la meilleure façon d'écouter, rouge = problème.\n" +
                       "La première fois, il faut Internet pour télécharger la langue."
                   aide.textSize = 13f
@@ -740,7 +747,7 @@ jobs:
               // ------------------------- RECONNAISSANCE -------------------------
               private fun nouvelleSession() {
                   main.removeCallbacks(runSession)
-                  if (!actif) return
+                  if (!actif || ecoutePause) return
                   val st = strats[strategie]
                   try {
                       if (reco == null || recoStrat != st) {
@@ -845,7 +852,7 @@ jobs:
               }
 
               private fun gererErreur(code: Int) {
-                  if (!actif) return
+                  if (!actif || ecoutePause) return
                   when (code) {
                       SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
                           relancer(20)
@@ -1037,6 +1044,7 @@ jobs:
                   titre.textSize = 12f
                   titre.setPadding(0, dp(6f), 0, dp(6f))
                   entete.addView(titre, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                  entete.addView(bouton("✍") { basculerBarre() })
                   entete.addView(bouton("A−") { changerTaille(-2f) })
                   entete.addView(bouton("A+") { changerTaille(2f) })
                   entete.addView(bouton("▾") { basculerPanneau() })
@@ -1088,7 +1096,250 @@ jobs:
                   tvTrad?.textSize = taille
               }
 
+              // ------------------------- RÉPONDRE -------------------------
+              // J'écris (ou je dis) mon message dans ma langue : il est traduit dans la
+              // langue du live et copié tout seul, prêt à coller dans le chat.
+              private var barre: LinearLayout? = null
+              private var etMessage: EditText? = null
+              private var tvReponse: TextView? = null
+              private var reponseCourante = ""
+              private var retour: Translator? = null
+              private var retourPret = false
+              private var seqRetour = 0
+              private var recoVoix: SpeechRecognizer? = null
+              @Volatile private var ecoutePause = false
+              private val tradAuto = Runnable { traduireMessage() }
+
+              private fun basculerBarre() {
+                  if (barre != null) fermerBarre() else creerBarre()
+              }
+
+              private fun preparerRetour() {
+                  if (source.code == cible.code) {
+                      retourPret = true
+                      return
+                  }
+                  if (retour != null) return
+                  val tr = Translation.getClient(
+                      TranslatorOptions.Builder().setSourceLanguage(cible.code).setTargetLanguage(source.code).build()
+                  )
+                  retour = tr
+                  tvReponse?.text = "Préparation de la traduction vers ${source.nom}…"
+                  tr.downloadModelIfNeeded(DownloadConditions.Builder().build())
+                      .addOnSuccessListener {
+                          if (retour === tr) {
+                              retourPret = true
+                              tvReponse?.text = ""
+                              traduireMessage()
+                          }
+                      }
+                      .addOnFailureListener {
+                          if (retour === tr) {
+                              tvReponse?.text = "Il faut Internet la première fois pour télécharger ${source.nom}."
+                              retour = null
+                              try { tr.close() } catch (_: Exception) {}
+                          }
+                      }
+              }
+
+              private fun creerBarre() {
+                  val pad = dp(10f)
+                  val br = LinearLayout(this)
+                  br.orientation = LinearLayout.VERTICAL
+                  br.setPadding(pad, dp(4f), pad, pad)
+                  br.background = fond(0xF2101426.toInt(), dp(16f).toFloat())
+
+                  val entete = LinearLayout(this)
+                  entete.orientation = LinearLayout.HORIZONTAL
+                  entete.gravity = Gravity.CENTER_VERTICAL
+                  val titre = TextView(this)
+                  titre.text = "⠿ Répondre : ${cible.nom} → ${source.nom}"
+                  titre.setTextColor(0xFFFFD54F.toInt())
+                  titre.textSize = 12f
+                  titre.setPadding(0, dp(6f), 0, dp(6f))
+                  entete.addView(titre, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                  entete.addView(bouton("✕") { fermerBarre() })
+
+                  val et = EditText(this)
+                  et.hint = "Écris ici en ${cible.nom}…"
+                  et.setHintTextColor(0xFF8890B0.toInt())
+                  et.setTextColor(Color.WHITE)
+                  et.textSize = 16f
+                  et.maxLines = 3
+                  et.background = fond(0x33FFFFFF, dp(10f).toFloat())
+                  et.setPadding(dp(10f), dp(8f), dp(10f), dp(8f))
+                  et.addTextChangedListener(object : TextWatcher {
+                      override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                      override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+                      override fun afterTextChanged(s: Editable?) {
+                          main.removeCallbacks(tradAuto)
+                          main.postDelayed(tradAuto, 700)
+                      }
+                  })
+
+                  val rep = TextView(this)
+                  rep.setTextColor(0xFFFFD54F.toInt())
+                  rep.textSize = 17f
+                  rep.setTypeface(null, Typeface.BOLD)
+                  rep.setPadding(dp(2f), dp(8f), dp(2f), 0)
+                  rep.setOnClickListener { copier(true) }
+
+                  val ligne = LinearLayout(this)
+                  ligne.orientation = LinearLayout.HORIZONTAL
+                  val btVoix = Button(this)
+                  btVoix.text = "🎤 Parler"
+                  btVoix.setTextColor(Color.WHITE)
+                  btVoix.background = fond(ROUGE, dp(12f).toFloat())
+                  btVoix.setOnClickListener { dicter() }
+                  val btCopier = Button(this)
+                  btCopier.text = "📋 Copier"
+                  btCopier.setTextColor(Color.WHITE)
+                  btCopier.background = fond(TURQUOISE, dp(12f).toFloat())
+                  btCopier.setOnClickListener { copier(true) }
+                  ligne.addView(btVoix, LinearLayout.LayoutParams(0, dp(44f), 1f).apply { rightMargin = dp(6f) })
+                  ligne.addView(btCopier, LinearLayout.LayoutParams(0, dp(44f), 1f))
+
+                  br.addView(entete)
+                  br.addView(et)
+                  br.addView(rep)
+                  br.addView(ligne, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8f) })
+
+                  val ecran = resources.displayMetrics
+                  val lp = WindowManager.LayoutParams(
+                      ecran.widthPixels - dp(16f),
+                      WindowManager.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                      PixelFormat.TRANSLUCENT
+                  )
+                  lp.gravity = Gravity.TOP or Gravity.START
+                  lp.x = dp(8f)
+                  lp.y = dp(60f)
+                  lp.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE
+                  rendreDeplacable(titre, br, lp, null)
+                  wm.addView(br, lp)
+                  barre = br
+                  etMessage = et
+                  tvReponse = rep
+                  reponseCourante = ""
+                  et.requestFocus()
+                  et.postDelayed({
+                      try {
+                          getSystemService(InputMethodManager::class.java)?.showSoftInput(et, InputMethodManager.SHOW_IMPLICIT)
+                      } catch (_: Exception) {}
+                  }, 200)
+                  preparerRetour()
+              }
+
+              private fun fermerBarre() {
+                  main.removeCallbacks(tradAuto)
+                  arreterDictee()
+                  barre?.let { try { wm.removeView(it) } catch (_: Exception) {} }
+                  barre = null
+                  etMessage = null
+                  tvReponse = null
+              }
+
+              private fun traduireMessage() {
+                  val txt = etMessage?.text?.toString()?.trim() ?: return
+                  if (txt.isEmpty()) {
+                      reponseCourante = ""
+                      tvReponse?.text = ""
+                      return
+                  }
+                  if (source.code == cible.code) {
+                      montrerReponse(txt)
+                      return
+                  }
+                  val tr = retour
+                  if (tr == null || !retourPret) {
+                      preparerRetour()
+                      return
+                  }
+                  val seq = ++seqRetour
+                  tr.translate(txt)
+                      .addOnSuccessListener { r -> if (seq == seqRetour && barre != null) montrerReponse(r) }
+                      .addOnFailureListener { if (seq == seqRetour) tvReponse?.text = "Traduction impossible, réessaie." }
+              }
+
+              private fun montrerReponse(r: String) {
+                  reponseCourante = r
+                  tvReponse?.text = r
+                  copier(false)
+              }
+
+              private fun copier(montrer: Boolean) {
+                  val t = reponseCourante.trim()
+                  if (t.isEmpty()) return
+                  try {
+                      getSystemService(ClipboardManager::class.java)?.setPrimaryClip(ClipData.newPlainText("Lushi", t))
+                      if (montrer) Toast.makeText(this, "Copié ✅ Colle-le dans le chat.", Toast.LENGTH_SHORT).show()
+                  } catch (_: Exception) {}
+              }
+
+              // Dictée : on met l'écoute du live en pause le temps que je parle.
+              private fun dicter() {
+                  if (recoVoix != null) {
+                      arreterDictee()
+                      return
+                  }
+                  ecoutePause = true
+                  main.removeCallbacks(runSession)
+                  try { reco?.destroy() } catch (_: Exception) {}
+                  reco = null
+                  enCours = false
+                  val r = try { SpeechRecognizer.createSpeechRecognizer(this) } catch (e: Exception) { null }
+                  if (r == null) {
+                      arreterDictee()
+                      return
+                  }
+                  recoVoix = r
+                  tvReponse?.text = "🎤 Parle en ${cible.nom}…"
+                  r.setRecognitionListener(object : RecognitionListener {
+                      override fun onReadyForSpeech(params: Bundle?) {}
+                      override fun onBeginningOfSpeech() {}
+                      override fun onRmsChanged(rmsdB: Float) {}
+                      override fun onBufferReceived(buffer: ByteArray?) {}
+                      override fun onEndOfSpeech() {}
+                      override fun onEvent(eventType: Int, params: Bundle?) {}
+                      override fun onPartialResults(partialResults: Bundle?) {
+                          texte(partialResults)?.let { etMessage?.setText(it); etMessage?.setSelection(it.length) }
+                      }
+                      override fun onResults(results: Bundle?) {
+                          texte(results)?.let { etMessage?.setText(it); etMessage?.setSelection(it.length) }
+                          arreterDictee()
+                      }
+                      override fun onError(error: Int) {
+                          if (reponseCourante.isEmpty()) tvReponse?.text = "Je n'ai pas entendu. Appuie encore sur Parler."
+                          else tvReponse?.text = reponseCourante
+                          arreterDictee()
+                      }
+                  })
+                  val it = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+                  it.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                  it.putExtra(RecognizerIntent.EXTRA_LANGUAGE, cible.parole)
+                  it.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                  it.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
+                  try {
+                      r.startListening(it)
+                  } catch (e: Exception) {
+                      arreterDictee()
+                  }
+              }
+
+              private fun arreterDictee() {
+                  val r = recoVoix
+                  recoVoix = null
+                  if (r != null) main.post { try { r.destroy() } catch (_: Exception) {} }
+                  if (ecoutePause) {
+                      ecoutePause = false
+                      if (actif) relancer(400)
+                  }
+              }
+
               override fun onDestroy() {
+                  fermerBarre()
+                  try { retour?.close() } catch (_: Exception) {}
                   actif = false
                   main.removeCallbacksAndMessages(null)
                   try { reco?.destroy() } catch (_: Exception) {}
